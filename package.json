@@ -1,0 +1,50 @@
+{
+  "name": "@sovara/pi",
+  "version": "0.1.0",
+  "description": "Sovara tracing and lesson retrieval for Pi",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SovaraLabs/pi-sovara.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "sovara",
+    "observability"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "test:backend": "tsx --test test/backend.integration.ts",
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=1.2.0 <2"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.9.0"
+  }
+}
