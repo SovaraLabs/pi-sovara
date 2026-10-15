@@ -2,24 +2,14 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import {
-  loadConfig,
-  mode,
-  saveMode,
-  type LessonMode,
-} from "./config.ts";
+import { loadConfig } from "./config.ts";
 import { SovaraClient, SovaraError, type Scope } from "./client.ts";
 import { Recorder, withUsage } from "./recorder.ts";
 import {
   cleanMessages,
   lessonBlock,
-  LESSON_MESSAGE,
-  needsReminder,
   referenceMessage,
-  REMINDER,
-  REMINDER_MESSAGE,
   RetrievalSuffix,
-  SYSTEM_INSTRUCTION,
 } from "./lessons.ts";
 
 const PARENT_ENV = "SOVARA_PI_PARENT";
@@ -28,21 +18,17 @@ const CONFIG_ENTRY = "sovara-config-v1";
 interface Parent {
   url: string;
   projectName: string;
-  lessonMode: LessonMode;
   scope: Scope;
-  sessionId: string;
 }
 function inheritedParent(): Parent | undefined {
   const raw = process.env[PARENT_ENV];
   if (!raw) return;
   const value = JSON.parse(raw) as Parent;
-  mode(value.lessonMode);
   if (
     !value.url ||
     !value.projectName ||
     !value.scope?.recording?.run_write_token ||
-    !value.scope.turnId ||
-    !value.sessionId
+    !value.scope.turnId
   ) {
     throw new Error("Invalid Sovara parent context");
   }
@@ -91,31 +77,14 @@ export default function sovara(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("sovara", {
-    description:
-      "Show Sovara status, or set mode automatic|mcp-reminder|mcp-system for new sessions",
-    handler: async (args, ctx) => {
-      if (args.trim().startsWith("mode ")) {
-        try {
-          const next = mode(args.trim().slice(5));
-          await saveMode(ctx.cwd, next);
-          ctx.ui.notify(
-            `Sovara mode saved: ${next}. Start /new to use it; this session keeps its current mode.`,
-            "info",
-          );
-        } catch {
-          ctx.ui.notify(
-            "Use /sovara mode automatic|mcp-reminder|mcp-system. The project config must be writable.",
-            "error",
-          );
-        }
-      } else {
-        ctx.ui.notify(
-          recorder
-            ? `Project: ${recorder.config.projectName}\nMode: ${recorder.config.lessonMode}\nRecording: ${recorder.scope ? "active" : "idle"}${exportFailed ? "\nA Sovara operation failed; export may be incomplete." : ""}`
-            : "Sovara is unavailable. Check your connection and reload.",
-          "info",
-        );
-      }
+    description: "Show Sovara project and recording status",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(
+        recorder
+          ? `Project: ${recorder.config.projectName}\nRecording: ${recorder.scope ? "active" : "idle"}${exportFailed ? "\nA Sovara operation failed; export may be incomplete." : ""}`
+          : "Sovara is unavailable. Check your connection and reload.",
+        "info",
+      );
     },
   });
 
@@ -131,7 +100,7 @@ export default function sovara(pi: ExtensionAPI): void {
         ctx.isProjectTrusted(),
       );
       const parent = inheritedParent();
-      // A resumed session keeps its experiment assignment, even after a mode change.
+      // A resumed session keeps its original project binding.
       const entries = ctx.sessionManager.getEntries();
       const saved = [...entries]
         .reverse()
@@ -146,18 +115,15 @@ export default function sovara(pi: ExtensionAPI): void {
       ) {
         const data = saved.data as {
           projectName?: unknown;
-          lessonMode?: unknown;
         };
         if (typeof data?.projectName !== "string" || !data.projectName)
           throw new Error("Invalid session binding");
         config.projectName = data.projectName;
-        config.lessonMode = mode(data.lessonMode);
       }
       if (parent) {
         if (parent.url !== config.execUrl)
           throw new Error("Subagent Sovara server differs from parent");
         config.projectName = parent.projectName;
-        config.lessonMode = parent.lessonMode;
       }
       const client = new SovaraClient(config);
       if (parent) client.protect(parent.scope.recording.run_write_token);
@@ -174,10 +140,9 @@ export default function sovara(pi: ExtensionAPI): void {
       if (!saved || event.reason === "fork" || event.reason === "new") {
         pi.appendEntry(CONFIG_ENTRY, {
           projectName: config.projectName,
-          lessonMode: config.lessonMode,
         });
       }
-      status(ctx, `${config.projectName} · ${config.lessonMode}`);
+      status(ctx, config.projectName);
       initialized = true;
     });
     if (!initialized) await guarded(ctx, cleanup);
@@ -189,8 +154,6 @@ export default function sovara(pi: ExtensionAPI): void {
     summaryStartedAt = undefined;
     summaryPayload = undefined;
     restoreParent();
-    if (recorder.config.lessonMode === "mcp-system")
-      event.systemPromptOptions.sections.sovara = SYSTEM_INSTRUCTION;
     await guarded(ctx, async () => {
       exportFailed = false;
       await recorder!.start(
@@ -201,14 +164,9 @@ export default function sovara(pi: ExtensionAPI): void {
       process.env[PARENT_ENV] = JSON.stringify({
         url: recorder!.config.execUrl,
         projectName: recorder!.config.projectName,
-        lessonMode: recorder!.config.lessonMode,
         scope: recorder!.scope!,
-        sessionId: recorder!.sessionId,
       } satisfies Parent);
-      status(
-        ctx,
-        `${recorder!.config.projectName} · ${recorder!.config.lessonMode} · recording`,
-      );
+      status(ctx, `${recorder!.config.projectName} · recording`);
     });
   });
 
@@ -217,28 +175,17 @@ export default function sovara(pi: ExtensionAPI): void {
     if (!active?.scope?.turnId || summaryPending) return;
     let messages = cleanMessages(event.messages);
     try {
-      if (active.config.lessonMode === "automatic") {
-        const query = retrievalSuffix.context(messages);
-        const result = await active.retrieve(query.context, ctx.signal);
-        const block = lessonBlock(result);
-        active.retrieval = {
-          ...active.retrieval,
-          injected_lesson_ids: block.ids,
-          injected_text: block.text,
-          query_truncated: query.truncated,
-          injection_truncated: block.truncated,
-        };
-        if (block.text)
-          messages = [
-            ...messages,
-            referenceMessage(LESSON_MESSAGE, block.text),
-          ];
-      } else if (
-        active.config.lessonMode === "mcp-reminder" &&
-        needsReminder(messages)
-      ) {
-        messages = [...messages, referenceMessage(REMINDER_MESSAGE, REMINDER)];
-      }
+      const query = retrievalSuffix.context(messages);
+      const result = await active.retrieve(query.context, ctx.signal);
+      const block = lessonBlock(result);
+      active.retrieval = {
+        ...active.retrieval,
+        injected_lesson_ids: block.ids,
+        injected_text: block.text,
+        query_truncated: query.truncated,
+        injection_truncated: block.truncated,
+      };
+      if (block.text) messages = [...messages, referenceMessage(block.text)];
     } catch (error) {
       report(ctx, error);
     }
@@ -330,7 +277,6 @@ export default function sovara(pi: ExtensionAPI): void {
             capture: "pi-summary-event",
             provider_payload: summaryPayload,
             input_unavailable: summaryPayload === undefined,
-            lesson_mode: active.config.lessonMode,
           },
         );
         if (summaryStartedAt !== undefined) step.started = summaryStartedAt;

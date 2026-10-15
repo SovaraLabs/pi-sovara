@@ -1,18 +1,14 @@
-import { readFile, mkdir, writeFile, rename } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
 
-export const MODES = ["automatic", "mcp-reminder", "mcp-system"] as const;
-export type LessonMode = (typeof MODES)[number];
 export interface Config {
   projectName: string;
-  lessonMode: LessonMode;
   execUrl: string;
   authHeaders: Record<string, string>;
 }
 
-export async function readJson(
+async function readJson(
   path: string,
 ): Promise<Record<string, unknown> | undefined> {
   try {
@@ -26,7 +22,7 @@ export async function readJson(
   }
 }
 
-export function origin(value: unknown): string {
+function origin(value: unknown): string {
   if (typeof value !== "string")
     throw new Error("Sovara server URL must be an origin");
   const url = new URL(value);
@@ -42,12 +38,6 @@ export function origin(value: unknown): string {
   return url.origin;
 }
 
-export function mode(value: unknown): LessonMode {
-  if (!MODES.includes(value as LessonMode))
-    throw new Error("Invalid Sovara lesson mode");
-  return value as LessonMode;
-}
-
 export async function loadConfig(
   cwd: string,
   home = homedir(),
@@ -56,18 +46,16 @@ export async function loadConfig(
 ): Promise<Config> {
   const agentDir = env.PI_CODING_AGENT_DIR ?? join(home, ".pi", "agent");
   const global = (await readJson(join(agentDir, "sovara.json"))) ?? {};
+  if (
+    Object.keys(global).some((key) => !["projectName", "execUrl"].includes(key))
+  )
+    throw new Error("User Sovara config supports only projectName and execUrl");
   const local = projectTrusted
     ? ((await readJson(join(cwd, ".pi", "sovara.json"))) ?? {})
     : {};
   // A checked-in project file cannot redirect credentials to a different server.
-  if (
-    Object.keys(local).some(
-      (key) => !["projectName", "lessonMode"].includes(key),
-    )
-  ) {
-    throw new Error(
-      "Project Sovara config supports only projectName and lessonMode",
-    );
+  if (Object.keys(local).some((key) => !["projectName"].includes(key))) {
+    throw new Error("Project Sovara config supports only projectName");
   }
   const projectName =
     local.projectName ?? global.projectName ?? basename(resolve(cwd));
@@ -100,7 +88,6 @@ export async function loadConfig(
   const execUrl = origin(
     env.SOVARA_EXEC_SERVER_URL ?? global.execUrl ?? selected,
   );
-  const lessonMode = mode(local.lessonMode ?? global.lessonMode ?? "automatic");
   const authHeaders: Record<string, string> = {};
   if (env.SOVARA_AGENT_TOKEN?.trim())
     authHeaders["x-sovara-agent-token"] = env.SOVARA_AGENT_TOKEN.trim();
@@ -115,22 +102,5 @@ export async function loadConfig(
       authHeaders["x-sovara-platform-session"] = session.session_token;
     }
   }
-  return { projectName: projectName.trim(), lessonMode, execUrl, authHeaders };
-}
-
-export async function saveMode(
-  cwd: string,
-  lessonMode: LessonMode,
-): Promise<void> {
-  const directory = join(cwd, ".pi");
-  const path = join(directory, "sovara.json");
-  const config = (await readJson(path)) ?? {};
-  await mkdir(directory, { recursive: true });
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  await writeFile(
-    temporary,
-    JSON.stringify({ ...config, lessonMode }, null, 2) + "\n",
-    { mode: 0o600 },
-  );
-  await rename(temporary, path);
+  return { projectName: projectName.trim(), execUrl, authHeaders };
 }

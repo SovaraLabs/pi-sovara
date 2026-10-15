@@ -30,7 +30,6 @@ test(
       assert.match(execUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
       const config = {
         projectName: "pi-contract-test",
-        lessonMode: "automatic" as const,
         execUrl,
         authHeaders: {},
       };
@@ -55,9 +54,7 @@ test(
       );
       await recorder.start("First turn");
       const runId = recorder.scope!.recording.run_id;
-      const lessons = await recorder.retrieve(
-        "Synthetic task with no lessons",
-      );
+      const lessons = await recorder.retrieve("Synthetic task with no lessons");
       assert.equal(lessons.lessons.length, 0);
       await recorder.beginGeneration(
         {

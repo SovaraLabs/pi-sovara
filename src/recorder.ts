@@ -24,7 +24,6 @@ export class Recorder {
   retrieval?: Record<string, unknown>;
   firstTokenAt?: number;
   finalOutput: unknown = "";
-  failed = false;
 
   constructor(
     readonly client: SovaraClient,
@@ -37,7 +36,6 @@ export class Recorder {
 
   async start(input: string): Promise<void> {
     if (this.scope) await this.close("Superseded");
-    this.failed = false;
     this.finalOutput = "";
     this.retrieval = undefined;
     this.context = [];
@@ -50,25 +48,21 @@ export class Recorder {
     await this.client.io(this.scope, "input", input);
   }
 
-  async retrieve(
-    context: string,
-    signal?: AbortSignal,
-  ): Promise<Retrieval> {
+  async retrieve(context: string, signal?: AbortSignal): Promise<Retrieval> {
     const scope = this.scope;
     if (!scope?.turnId) throw new Error("No active Sovara turn");
     const step = await this.client.prepare(scope, "sovara.trace", "tool", {
       tool_name: "Sovara lesson retrieval",
       context,
       source: "pi-extension",
-      lesson_mode: this.config.lessonMode,
     });
     try {
       const result = await this.client.retrieve(scope, context, signal);
-      this.retrieval = { mode: this.config.lessonMode, query: context, result };
+      this.retrieval = { query: context, result };
       await this.client.finish(step, result);
       return result;
     } catch (error) {
-      this.retrieval = { mode: this.config.lessonMode, status: "failed" };
+      this.retrieval = { status: "failed" };
       await this.client.finish(step, { status: "failed" }, "RetrievalFailed");
       throw error;
     }
@@ -94,7 +88,6 @@ export class Recorder {
       provider: model?.provider,
       provider_payload: payload,
       capture: "pi-provider-hook",
-      lesson_mode: this.config.lessonMode,
       lesson_retrieval: this.retrieval ?? null,
       pi_session_id: this.sessionId,
       parent_session: this.parentSession,
@@ -107,7 +100,6 @@ export class Recorder {
     const error = ["error", "aborted"].includes(message.stopReason)
       ? message.stopReason
       : undefined;
-    if (error) this.failed = true;
     this.finalOutput = message.content;
     await this.client.finish(
       step,
@@ -135,7 +127,6 @@ export class Recorder {
       tool_call_id: id,
       parent_tool_call_id: parentToolCallId,
       ...(isMcp ? { root: { params: { name, arguments: args } } } : {}),
-      lesson_mode: this.config.lessonMode,
     };
     const step = await this.client.prepare(
       this.scope,
@@ -149,7 +140,6 @@ export class Recorder {
     const step = this.tools.get(id);
     if (!step) return;
     this.tools.delete(id);
-    if (failed) this.failed = true;
     await this.client.finish(step, result, failed ? "ToolError" : undefined);
   }
   async close(reason?: string): Promise<void> {

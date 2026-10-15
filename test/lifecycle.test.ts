@@ -11,10 +11,6 @@ async function harness(parent?: string) {
   const backend = await fixtureServer();
   const cwd = await mkdtemp(join(tmpdir(), "pi-lifecycle-"));
   await mkdir(join(cwd, ".pi"));
-  // A normal user-managed MCP connection must not conflict with the plugin.
-  await writeFile(join(cwd, ".pi", "mcp.json"), JSON.stringify({
-    mcpServers: { sovara: { url: "https://example.invalid/mcp" } },
-  }));
   const previous = {
     SOVARA_EXEC_SERVER_URL: process.env.SOVARA_EXEC_SERVER_URL,
     PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
@@ -29,7 +25,6 @@ async function harness(parent?: string) {
     );
   else delete process.env.SOVARA_PI_PARENT;
   const handlers = new Map<string, (event: any, ctx: any) => any>();
-  const commands = new Map<string, any>();
   let entries: any[] = [];
   let sessionId = "session-1";
   const statuses: string[] = [];
@@ -37,9 +32,7 @@ async function harness(parent?: string) {
     on(name: string, callback: any) {
       handlers.set(name, callback);
     },
-    registerCommand(name: string, command: any) {
-      commands.set(name, command);
-    },
+    registerCommand() {},
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data });
     },
@@ -68,12 +61,11 @@ async function harness(parent?: string) {
     cwd,
     statuses,
     emit,
-    commands,
     ctx,
-    async config(lessonMode: string) {
+    async config(projectName: string) {
       await writeFile(
         join(cwd, ".pi", "sovara.json"),
-        JSON.stringify({ projectName: "workspace", lessonMode }),
+        JSON.stringify({ projectName }),
       );
     },
     newSession() {
@@ -102,29 +94,28 @@ async function harness(parent?: string) {
   };
 }
 
-test("mode change applies to new sessions while resume keeps its assignment", async () => {
+test("project changes apply to new sessions while resume keeps its binding", async () => {
   const h = await harness();
   try {
+    await h.config("original");
     await h.start();
-    await h.commands.get("sovara").handler("mode mcp-system", h.ctx);
+    await h.config("changed");
     await h.emit("session_shutdown", { reason: "reload" });
     await h.emit("session_start", { reason: "resume" });
-    assert.match(h.statuses.at(-1)!, /automatic/);
+    assert.match(h.statuses.at(-1)!, /original/);
     await h.emit("session_shutdown", { reason: "new" });
     h.newSession();
     await h.emit("session_start", { reason: "new" });
-    assert.match(h.statuses.at(-1)!, /mcp-system/);
+    assert.match(h.statuses.at(-1)!, /changed/);
   } finally {
     await h.close();
   }
 });
 
-test("child processes inherit project and experiment mode and restore parent credentials", async () => {
+test("child processes inherit project and restore parent credentials", async () => {
   const parent = JSON.stringify({
     url: "BACKEND_URL",
     projectName: "parent-project",
-    lessonMode: "mcp-system",
-    sessionId: "parent-session",
     scope: {
       recording: {
         run_id: "parent-run",
@@ -138,17 +129,17 @@ test("child processes inherit project and experiment mode and restore parent cre
   const h = await harness(parent);
   const inherited = process.env.SOVARA_PI_PARENT;
   try {
-    await h.config("automatic");
+    await h.config("workspace");
     await h.start();
-    assert.match(h.statuses.at(-1)!, /parent-project.*mcp-system/);
+    assert.match(h.statuses.at(-1)!, /parent-project/);
     await h.prompt();
     const subrun = h.backend.calls.find((c) => c.path === "/runner/subrun")!;
     assert.equal(subrun.body.parent_run_id, "parent-run");
     assert.equal(subrun.body.turn_id, "parent-turn");
     assert.equal(subrun.headers["x-sovara-run-token"], "parent-secret");
     assert.equal(
-      JSON.parse(process.env.SOVARA_PI_PARENT!).lessonMode,
-      "mcp-system",
+      JSON.parse(process.env.SOVARA_PI_PARENT!).projectName,
+      "parent-project",
     );
     await h.emit("agent_settled");
     assert.equal(process.env.SOVARA_PI_PARENT, inherited);

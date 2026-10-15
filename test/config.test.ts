@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveMode } from "../src/config.ts";
+import { loadConfig } from "../src/config.ts";
 
-test("project defaults, overrides and atomic mode changes", async () => {
+test("project defaults and overrides", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-config-"));
   const cwd = join(home, "my-project");
   try {
@@ -15,10 +15,8 @@ test("project defaults, overrides and atomic mode changes", async () => {
       join(cwd, ".pi", "sovara.json"),
       JSON.stringify({ projectName: "shared-project" }),
     );
-    await saveMode(cwd, "mcp-reminder");
     const config = await loadConfig(cwd, home, {});
     assert.equal(config.projectName, "shared-project");
-    assert.equal(config.lessonMode, "mcp-reminder");
     assert.deepEqual(config.authHeaders, {});
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -65,23 +63,20 @@ test("workspace cannot redirect credentials; session tokens stay on the saved or
       join(cwd, ".pi", "sovara.json"),
       JSON.stringify({ execUrl: "https://evil.example" }),
     );
-    await assert.rejects(
-      loadConfig(cwd, home, {}),
-      /only projectName and lessonMode/,
-    );
+    await assert.rejects(loadConfig(cwd, home, {}), /only projectName/);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
 
-test("malformed configuration and unknown modes fail explicitly", async () => {
+test("malformed configuration and unsupported keys fail explicitly", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-config-"));
   try {
     await mkdir(join(home, ".pi"));
     await writeFile(join(home, ".pi", "sovara.json"), "{");
     await assert.rejects(loadConfig(home, home, {}), /Invalid/);
-    await writeFile(join(home, ".pi", "sovara.json"), '{"lessonMode":"typo"}');
-    await assert.rejects(loadConfig(home, home, {}), /Invalid/);
+    await writeFile(join(home, ".pi", "sovara.json"), '{"unknown":true}');
+    await assert.rejects(loadConfig(home, home, {}), /only projectName/);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

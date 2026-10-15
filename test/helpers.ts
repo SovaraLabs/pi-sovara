@@ -75,7 +75,6 @@ export async function fixtureServer() {
   const address = server.address() as { port: number };
   const config: Config = {
     projectName: "fixture",
-    lessonMode: "automatic",
     execUrl: `http://127.0.0.1:${address.port}`,
     authHeaders: { "x-sovara-agent-token": "agent-secret" },
   };
