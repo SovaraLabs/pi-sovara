@@ -18,7 +18,7 @@ import {
   referenceMessage,
   REMINDER,
   REMINDER_MESSAGE,
-  retrievalContext,
+  RetrievalSuffix,
   SYSTEM_INSTRUCTION,
 } from "./lessons.ts";
 
@@ -51,6 +51,7 @@ function inheritedParent(): Parent | undefined {
 
 export default function sovara(pi: ExtensionAPI): void {
   let recorder: Recorder | undefined;
+  let retrievalSuffix = new RetrievalSuffix();
   let exportFailed = false;
   let summaryPending = false;
   let summaryStartedAt: number | undefined;
@@ -85,6 +86,7 @@ export default function sovara(pi: ExtensionAPI): void {
     restoreParent();
     const previous = recorder;
     recorder = undefined;
+    retrievalSuffix = new RetrievalSuffix();
     await previous?.close("SessionClosed");
   }
 
@@ -216,7 +218,7 @@ export default function sovara(pi: ExtensionAPI): void {
     let messages = cleanMessages(event.messages);
     try {
       if (active.config.lessonMode === "automatic") {
-        const query = retrievalContext(messages);
+        const query = retrievalSuffix.context(messages);
         const result = await active.retrieve(query.context, ctx.signal);
         const block = lessonBlock(result);
         active.retrieval = {

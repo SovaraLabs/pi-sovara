@@ -61,7 +61,7 @@ The server environment override takes precedence over the user-level URL.
 
 | Mode                  | Behavior                                                                                                                                                                     |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `automatic` (default) | Before each normal agent model call, retrieve using its current Pi transcript and append a request-local lesson message. No model decision or MCP call is needed.            |
+| `automatic` (default) | Before each normal agent model call, retrieve using the new suffix of its Pi transcript and append a request-local lesson message. No model decision or MCP call is needed.            |
 | `mcp-reminder`        | Append a request-local reminder to use your configured Sovara MCP server. Suppress it after a retrieval result; re-arm it after new user input or other tool results. |
 | `mcp-system`          | Add a standing system instruction to use your configured Sovara MCP server. No per-step reminder or automatic retrieval.                                                         |
 
@@ -81,8 +81,12 @@ Use fresh sessions for comparisons so earlier lesson/tool messages do not contam
 Automatic retrieval uses `context_with_system`, after Pi has assembled system/tool state. It
 preserves that state and appends one custom message. It does not steer the agent, trigger another
 turn, or persist injected messages into Pi's conversation. Old plugin messages are removed before
-query construction. Retrieval input is capped at 128,000 characters, retaining the most recent
-portion if needed. Injection is capped at approximately 12,000 characters; oversized lessons are
+query construction. Retrieval uses only messages appended since the previous model input, excluding
+system state and volatile metadata, in Sovara’s structured format with an empty prefix. Identical
+inputs reuse the suffix query for retries. On resume or rewritten history (compaction/branching),
+the baseline is the latest user turn, or the last message if no user message remains. Image bytes
+are excluded from retrieval. Suffix text is capped at 128,000 characters, retaining its newest portion
+inside valid structured JSON; this limit applies to the suffix, not the whole conversation. Injection is capped at approximately 12,000 characters; oversized lessons are
 omitted whole. Both truncation decisions and the exact injected lesson IDs/text are recorded.
 Other extensions registered later can still transform the context or provider payload.
 

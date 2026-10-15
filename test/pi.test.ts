@@ -176,6 +176,10 @@ for (const lessonMode of MODES) {
       assert.ok(finalized.some((c) => c.body.step_kind === "tool"));
       assert.ok(server.calls.some((c) => c.path === "/runner/deregister"));
       if (lessonMode === "automatic") {
+        const secondQuery = JSON.parse(retrievals[1]!.body.raw_context);
+        assert.deepEqual(secondQuery.prefix, []);
+        assert.match(JSON.stringify(secondQuery.suffix), /Synthetic test evidence/);
+        assert.doesNotMatch(JSON.stringify(secondQuery.suffix), /Inspect input.txt and explain/);
         assert.ok(
           inputs.every((input) =>
             JSON.stringify(input).includes("Use a deterministic clock."),
