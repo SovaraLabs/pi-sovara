@@ -181,6 +181,7 @@ test("retrieval rejects malformed responses at the boundary", async () => {
       projectName: "test",
       execUrl: "https://fixture.invalid",
       authHeaders: {},
+      autoStartLocal: false,
     },
     fetcher,
   );

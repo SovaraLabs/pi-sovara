@@ -84,6 +84,7 @@ export async function fixtureServer() {
     projectName: "fixture",
     execUrl: `http://127.0.0.1:${address.port}`,
     authHeaders: { "x-sovara-agent-token": "agent-secret" },
+    autoStartLocal: false,
   };
   return {
     calls,

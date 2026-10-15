@@ -32,6 +32,7 @@ test(
         projectName: "pi-contract-test",
         execUrl,
         authHeaders: {},
+        autoStartLocal: false,
       };
       const client = new SovaraClient(config);
       let connected = false;

@@ -27,7 +27,7 @@ Pi loads the TypeScript entry point directly; no build step is needed.
 
 ## Try it from a checkout
 
-With Node.js 22.19+ and a running compatible Sovara server, install this checkout's dependencies
+With Node.js 22.19+ and the Sovara CLI installed, install this checkout's dependencies
 and launch the bundled Pi 1.2.0 with the extension explicitly loaded:
 
 ```sh
@@ -50,7 +50,15 @@ The extension uses the saved Sovara Desktop/CLI connection in `~/.sovara/app_con
 It reads the signed-in session from `~/.sovara/app_session.json` only for that saved server.
 For an explicitly configured server, set `SOVARA_EXEC_SERVER_URL` and, where needed,
 `SOVARA_AGENT_TOKEN` in your shell or secret manager. Without a saved connection or override,
-the target is `http://127.0.0.1:5960`. The server must already be running.
+the target is `http://127.0.0.1:5960`. For the saved Local connection (or the default local target),
+Pi automatically runs `sovara exec-server start` if the connection is refused, then checks health
+and runner-api compatibility again. Install the [Sovara CLI](https://docs.sovara-labs.com/cli/install)
+so its bundled recording service is available. Startup is bounded to 60 seconds; failure is reported
+without blocking normal Pi use indefinitely.
+
+Remote connections and explicit `execUrl` / `SOVARA_EXEC_SERVER_URL` overrides are health-checked
+only, even when they point at loopback (for example, an SSH tunnel). Those servers must already be
+running. Authentication, HTTP, compatibility and malformed-response errors never trigger startup.
 
 The default project name is the **startup working directory's basename**.
 For example, starting Pi in `/work/backend` selects the Sovara project `backend`.

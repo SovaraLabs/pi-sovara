@@ -81,3 +81,71 @@ test("malformed configuration and unsupported keys fail explicitly", async () =>
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test("automatic startup follows connection provenance, not just a loopback URL", async () => {
+  const home = await mkdtemp(join(tmpdir(), "pi-startup-config-"));
+  try {
+    await mkdir(join(home, ".sovara"));
+    await mkdir(join(home, "agent"));
+    const env = { PI_CODING_AGENT_DIR: join(home, "agent") };
+    assert.equal((await loadConfig(home, home, env)).autoStartLocal, true);
+    for (const [connection, expected] of [
+      [{ version: 1, mode: "local" }, true],
+      [
+        {
+          version: 1,
+          mode: "remote",
+          remote_server_url: "https://remote.example",
+        },
+        false,
+      ],
+      [
+        {
+          version: 2,
+          active_app_origin: "http://127.0.0.1:5959",
+          connections: [{ kind: "local", app_origin: "http://127.0.0.1:5959" }],
+        },
+        true,
+      ],
+      [
+        {
+          version: 2,
+          active_app_origin: "http://127.0.0.1:5970",
+          connections: [
+            { kind: "remote", app_origin: "http://127.0.0.1:5970" },
+          ],
+        },
+        false,
+      ],
+    ] as const) {
+      await writeFile(
+        join(home, ".sovara", "app_connection.json"),
+        JSON.stringify(connection),
+      );
+      assert.equal(
+        (await loadConfig(home, home, env)).autoStartLocal,
+        expected,
+      );
+    }
+    await writeFile(
+      join(home, ".sovara", "app_connection.json"),
+      JSON.stringify({ version: 1, mode: "local" }),
+    );
+    assert.equal(
+      (
+        await loadConfig(home, home, {
+          ...env,
+          SOVARA_EXEC_SERVER_URL: "http://127.0.0.1:5960",
+        })
+      ).autoStartLocal,
+      false,
+    );
+    await writeFile(
+      join(home, "agent", "sovara.json"),
+      JSON.stringify({ execUrl: "http://127.0.0.1:5960" }),
+    );
+    assert.equal((await loadConfig(home, home, env)).autoStartLocal, false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});

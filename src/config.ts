@@ -5,6 +5,8 @@ import { basename, join, resolve } from "node:path";
 export interface Config {
   projectName: string;
   execUrl: string;
+  /** Derived from connection provenance, never a workspace setting. */
+  autoStartLocal: boolean;
   authHeaders: Record<string, string>;
 }
 
@@ -66,9 +68,11 @@ export async function loadConfig(
   );
   let selected = "http://127.0.0.1:5960";
   let trustedOrigin: string | undefined;
+  let localConnection = true;
   if (connection) {
     if (connection.version === 1 && connection.mode === "remote") {
       selected = trustedOrigin = origin(connection.remote_server_url);
+      localConnection = false;
     } else if (connection.version === 1 && connection.mode === "local") {
       trustedOrigin = selected;
     } else if (
@@ -85,7 +89,8 @@ export async function loadConfig(
       );
       if (!entry || (entry.kind !== "local" && entry.kind !== "remote"))
         throw new Error("Invalid Sovara connection");
-      selected = entry.kind === "local" ? selected : active;
+      localConnection = entry.kind === "local";
+      selected = localConnection ? selected : active;
       trustedOrigin = selected;
     } else throw new Error("Unsupported Sovara connection configuration");
   }
@@ -106,5 +111,13 @@ export async function loadConfig(
       authHeaders["x-sovara-platform-session"] = session.session_token;
     }
   }
-  return { projectName: projectName.trim(), execUrl, authHeaders };
+  return {
+    projectName: projectName.trim(),
+    execUrl,
+    authHeaders,
+    autoStartLocal:
+      localConnection &&
+      env.SOVARA_EXEC_SERVER_URL === undefined &&
+      global.execUrl === undefined,
+  };
 }

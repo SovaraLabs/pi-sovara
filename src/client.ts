@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { Config } from "./config.ts";
 import { redact } from "./redaction.ts";
 
@@ -51,6 +53,16 @@ function field(value: unknown, name: string): string {
   return data[name];
 }
 
+async function startLocalServer(execUrl: string): Promise<void> {
+  await promisify(execFile)("sovara", ["exec-server", "start"], {
+    // Freeze the selected target if the Desktop connection changes during startup.
+    env: { ...process.env, SOVARA_EXEC_SERVER_URL: execUrl },
+    timeout: 60000,
+    maxBuffer: 65536,
+    windowsHide: true,
+  });
+}
+
 /** Narrow runner-api 4 adapter. No SDK monkey patches or provider credentials. */
 export class SovaraClient {
   private compatible = false;
@@ -58,6 +70,7 @@ export class SovaraClient {
   constructor(
     readonly config: Config,
     private fetcher: typeof fetch = fetch,
+    private startServer: (execUrl: string) => Promise<void> = startLocalServer,
   ) {}
 
   protect(secret: string): void {
@@ -93,8 +106,7 @@ export class SovaraClient {
     return JSON.stringify({ raw, to_show });
   }
 
-  async connect(): Promise<void> {
-    this.compatible = false;
+  private async health(): Promise<Response> {
     let response = await this.fetcher(`${this.config.execUrl}/runner/health`, {
       signal: AbortSignal.timeout(5000),
       redirect: "error",
@@ -104,6 +116,36 @@ export class SovaraClient {
         signal: AbortSignal.timeout(5000),
         redirect: "error",
       });
+    return response;
+  }
+
+  async connect(): Promise<void> {
+    this.compatible = false;
+    let response: Response;
+    try {
+      response = await this.health();
+    } catch (error) {
+      // Only a stopped, managed local service warrants startup. A remote, slow,
+      // incompatible or malformed service must never trigger a local process.
+      if (
+        !this.config.autoStartLocal ||
+        !(error instanceof TypeError) ||
+        (error.cause as NodeJS.ErrnoException | undefined)?.code !==
+          "ECONNREFUSED"
+      )
+        throw error;
+      try {
+        await this.startServer(this.config.execUrl);
+      } catch (startError) {
+        // CLI stderr may include paths or credentials. Keep the UI error safe.
+        throw new SovaraError(
+          (startError as NodeJS.ErrnoException).code === "ENOENT"
+            ? "cli_not_found"
+            : "exec_server_start_failed",
+        );
+      }
+      response = await this.health();
+    }
     if (!response.ok) throw new SovaraError("health_failed", response.status);
     const metadata = object(object(await response.json()).compatibility);
     const versions = object(metadata.contracts)["runner-api"];
