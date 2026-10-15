@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { redact } from "./redaction.ts";
 import type { Retrieval } from "./client.ts";
 
 export const LESSON_MESSAGE = "sovara-lessons";
@@ -55,23 +56,28 @@ export class RetrievalSuffix {
                 };
               return part;
             });
-      return JSON.stringify({
-        role: message.role,
-        content,
-        ...(message.role === "toolResult"
-          ? {
-              toolName: message.toolName,
-              toolCallId: message.toolCallId,
-              isError: message.isError,
-            }
-          : {}),
-        ...(message.role === "custom"
-          ? { customType: message.customType }
-          : {}),
-        ...(message.role === "bashExecution"
-          ? { command: message.command }
-          : {}),
-      });
+      return JSON.stringify(
+        redact(
+          {
+            role: message.role,
+            content,
+            ...(message.role === "toolResult"
+              ? {
+                  toolName: message.toolName,
+                  toolCallId: message.toolCallId,
+                  isError: message.isError,
+                }
+              : {}),
+            ...(message.role === "custom"
+              ? { customType: message.customType }
+              : {}),
+            ...(message.role === "bashExecution"
+              ? { command: message.command }
+              : {}),
+          },
+          [],
+        ),
+      );
     });
     let common = 0;
     while (

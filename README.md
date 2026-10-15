@@ -80,8 +80,11 @@ project settings snapshot. The TypeScript SDK currently has no public standalone
 its lesson injection is coupled to transport instrumentation, so this extension uses its narrow
 HTTP client. No MCP connection is required.
 
-Retrieval is allowed up to 15 seconds; failures leave the agent running without added lessons and
-are surfaced in the status. Sovara retrieval can consume configured model quota.
+The retrieval request is allowed up to 15 seconds; failures leave the agent running without added
+lessons and are surfaced in the status. Trace export failures do not discard successfully retrieved
+lessons. Cancellation interrupts preparation, retrieval, and finalization; closing an already
+prepared observation after cancellation has a separate one-second deadline. Credential fields are
+masked before suffix serialization. Sovara retrieval can consume configured model quota.
 
 ## Tracing
 

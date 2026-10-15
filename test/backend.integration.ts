@@ -65,6 +65,10 @@ test(
       );
       await recorder.endGeneration({
         role: "assistant",
+        api: "openai-completions",
+        provider: "test",
+        model: "gpt-test",
+        timestamp: 1,
         content: [{ type: "text", text: "Synthetic answer" }],
         usage: {
           input: 12,
@@ -72,6 +76,7 @@ test(
           cacheRead: 2,
           cacheWrite: 0,
           totalTokens: 21,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
         },
         stopReason: "stop",
       });

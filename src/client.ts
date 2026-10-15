@@ -41,8 +41,14 @@ export class SovaraError extends Error {
     super(`Sovara ${code}${status ? ` (HTTP ${status})` : ""}`);
   }
 }
-function field(data: any, name: string): string {
-  if (typeof data?.[name] !== "string" || !data[name])
+function object(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new SovaraError("invalid_response");
+  return value as Record<string, unknown>;
+}
+function field(value: unknown, name: string): string {
+  const data = object(value);
+  if (typeof data[name] !== "string" || !data[name])
     throw new SovaraError("invalid_response");
   return data[name];
 }
@@ -75,8 +81,8 @@ export class SovaraClient {
         redirect: "error",
       });
     if (!response.ok) throw new SovaraError("health_failed", response.status);
-    const metadata = (await response.json())?.compatibility;
-    const versions = metadata?.contracts?.["runner-api"];
+    const metadata = object(object(await response.json()).compatibility);
+    const versions = object(metadata.contracts)["runner-api"];
     if (
       metadata?.component !== "exec-server" ||
       !Array.isArray(versions) ||
@@ -97,7 +103,8 @@ export class SovaraClient {
     recording?: Recording,
     signal?: AbortSignal,
     timeout = 10000,
-  ): Promise<any> {
+  ): Promise<unknown> {
+    signal?.throwIfAborted();
     if (!this.compatible) throw new SovaraError("not_connected");
     const response = await this.fetcher(`${this.config.execUrl}${path}`, {
       method: "POST",
@@ -139,7 +146,7 @@ export class SovaraClient {
       }),
     );
   }
-  private recording(data: any): Recording {
+  private recording(data: unknown): Recording {
     this.protect(field(data, "run_write_token"));
     return {
       run_id: field(data, "run_id"),
@@ -159,7 +166,10 @@ export class SovaraClient {
       },
       parent.recording,
     );
-    return this.recording({ ...data, project_id: parent.recording.project_id });
+    return this.recording({
+      ...object(data),
+      project_id: parent.recording.project_id,
+    });
   }
   async turn(recording: Recording, input: string): Promise<Scope> {
     const data = await this.request(
@@ -168,8 +178,8 @@ export class SovaraClient {
       recording,
     );
     if (
-      data.run_id !== recording.run_id ||
-      data.recording_id !== recording.recording_id
+      field(data, "run_id") !== recording.run_id ||
+      field(data, "recording_id") !== recording.recording_id
     )
       throw new SovaraError("invalid_turn_identity");
     return { recording, turnId: field(data, "turn_id") };
@@ -215,22 +225,42 @@ export class SovaraClient {
       signal,
       15000,
     );
+    const payload = object(data);
     if (
-      !Array.isArray(data.lessons) ||
-      typeof data.rendered_lessons_block !== "string" ||
-      data.lessons.some(
-        (l: any) =>
-          typeof l.lesson_id !== "string" || typeof l.content !== "string",
-      )
+      !Array.isArray(payload.lessons) ||
+      typeof payload.rendered_lessons_block !== "string" ||
+      typeof payload.retrieval_status !== "string" ||
+      !payload.retrieval_status
     )
       throw new SovaraError("invalid_retrieval");
-    return data;
+    const lessons = payload.lessons.map((value: unknown): Lesson => {
+      const lesson = object(value);
+      if (
+        typeof lesson.title !== "string" ||
+        typeof lesson.content !== "string"
+      )
+        throw new SovaraError("invalid_retrieval");
+      return {
+        ...lesson,
+        lesson_id: field(lesson, "lesson_id"),
+        title: lesson.title,
+        content: lesson.content,
+      };
+    });
+    return {
+      ...payload,
+      lessons,
+      rendered_lessons_block: payload.rendered_lessons_block,
+      retrieval_status: payload.retrieval_status,
+    };
   }
+
   async prepare(
     scope: Scope,
     api: string,
     kind: "llm" | "tool" | "mcp",
     input: unknown,
+    signal?: AbortSignal,
   ): Promise<Step> {
     const id = randomUUID();
     const started = Date.now();
@@ -247,8 +277,10 @@ export class SovaraClient {
         prompt_bearing_suffix_json: "[]",
       },
       scope.recording,
+      signal,
     );
-    if (data.step_uuid !== id) throw new SovaraError("invalid_step_identity");
+    if (field(data, "step_uuid") !== id)
+      throw new SovaraError("invalid_step_identity");
     return { id, scope, api, kind, input, started };
   }
   async finish(
@@ -256,6 +288,7 @@ export class SovaraClient {
     output: unknown,
     errorType?: string,
     metadata?: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<void> {
     await this.request(
       "/internal/runner/llm/finalize",
@@ -275,6 +308,7 @@ export class SovaraClient {
         lesson_metadata: metadata ?? null,
       },
       step.scope.recording,
+      signal,
     );
   }
 }

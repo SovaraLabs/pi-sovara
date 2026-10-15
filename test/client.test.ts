@@ -47,8 +47,19 @@ test("records resume, retrieval, provider retries, parallel tools, and exact tur
     );
     await recorder.endGeneration({
       role: "assistant",
-      content: "answer",
-      usage: { input: 10 },
+      api: "openai-completions",
+      provider: "test",
+      model: "test",
+      timestamp: 1,
+      content: [{ type: "text", text: "answer" }],
+      usage: {
+        input: 10,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 10,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
       stopReason: "stop",
     });
     await Promise.all([

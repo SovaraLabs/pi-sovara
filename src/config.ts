@@ -77,9 +77,13 @@ export async function loadConfig(
     ) {
       const active = origin(connection.active_app_origin);
       const entry = connection.connections.find(
-        (c: any) => c.app_origin === active,
+        (c: unknown): c is Record<string, unknown> =>
+          !!c &&
+          typeof c === "object" &&
+          "app_origin" in c &&
+          c.app_origin === active,
       );
-      if (!entry || !["local", "remote"].includes(entry.kind))
+      if (!entry || (entry.kind !== "local" && entry.kind !== "remote"))
         throw new Error("Invalid Sovara connection");
       selected = entry.kind === "local" ? selected : active;
       trustedOrigin = selected;

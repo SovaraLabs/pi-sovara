@@ -1,17 +1,28 @@
 import type { SovaraClient, Scope, Step, Retrieval } from "./client.ts";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Config } from "./config.ts";
 
 /** Pi reports uncached input separately, matching Sovara's normalized token columns. */
-export function withUsage(value: any): unknown {
-  if (!value?.usage) return value;
+export function withUsage(value: unknown): unknown {
+  if (!value || typeof value !== "object" || !("usage" in value)) return value;
+  const usage = value.usage;
+  if (!usage || typeof usage !== "object") return value;
   return {
     ...value,
     usage: {
-      ...value.usage,
-      input_tokens: value.usage.input,
-      output_tokens: value.usage.output,
-      cache_read_input_tokens: value.usage.cacheRead,
-      cache_creation_input_tokens: value.usage.cacheWrite,
+      ...usage,
+      ...("input" in usage && typeof usage.input === "number"
+        ? { input_tokens: usage.input }
+        : {}),
+      ...("output" in usage && typeof usage.output === "number"
+        ? { output_tokens: usage.output }
+        : {}),
+      ...("cacheRead" in usage && typeof usage.cacheRead === "number"
+        ? { cache_read_input_tokens: usage.cacheRead }
+        : {}),
+      ...("cacheWrite" in usage && typeof usage.cacheWrite === "number"
+        ? { cache_creation_input_tokens: usage.cacheWrite }
+        : {}),
     },
   };
 }
@@ -22,6 +33,7 @@ export class Recorder {
   readonly tools = new Map<string, Step>();
   context: unknown[] = [];
   retrieval?: Record<string, unknown>;
+  retrievalExportError?: unknown;
   firstTokenAt?: number;
   finalOutput: unknown = "";
 
@@ -49,23 +61,59 @@ export class Recorder {
   }
 
   async retrieve(context: string, signal?: AbortSignal): Promise<Retrieval> {
+    this.retrievalExportError = undefined;
+    signal?.throwIfAborted();
     const scope = this.scope;
     if (!scope?.turnId) throw new Error("No active Sovara turn");
-    const step = await this.client.prepare(scope, "sovara.trace", "tool", {
-      tool_name: "Sovara lesson retrieval",
-      context,
-      source: "pi-extension",
-    });
+    let step: Step | undefined;
     try {
-      const result = await this.client.retrieve(scope, context, signal);
+      step = await this.client.prepare(
+        scope,
+        "sovara.trace",
+        "tool",
+        {
+          tool_name: "Sovara lesson retrieval",
+          context,
+          source: "pi-extension",
+        },
+        signal,
+      );
+    } catch (error) {
+      signal?.throwIfAborted();
+      this.retrievalExportError = error;
+    }
+    let result: Retrieval;
+    try {
+      signal?.throwIfAborted();
+      result = await this.client.retrieve(scope, context, signal);
       this.retrieval = { query: context, result };
-      await this.client.finish(step, result);
-      return result;
     } catch (error) {
       this.retrieval = { status: "failed" };
-      await this.client.finish(step, { status: "failed" }, "RetrievalFailed");
+      if (step) {
+        try {
+          // Closing an already prepared observation may outlive cancellation, but only for one second.
+          await this.client.finish(
+            step,
+            { status: "failed" },
+            "RetrievalFailed",
+            undefined,
+            signal?.aborted ? AbortSignal.timeout(1000) : signal,
+          );
+        } catch (exportError) {
+          this.retrievalExportError = exportError;
+        }
+      }
       throw error;
     }
+    if (step) {
+      try {
+        await this.client.finish(step, result, undefined, undefined, signal);
+      } catch (error) {
+        this.retrievalExportError = error;
+      }
+    }
+    signal?.throwIfAborted();
+    return result;
   }
 
   async beginGeneration(
@@ -93,7 +141,7 @@ export class Recorder {
       parent_session: this.parentSession,
     });
   }
-  async endGeneration(message: any): Promise<void> {
+  async endGeneration(message: AssistantMessage): Promise<void> {
     if (!this.generation) return;
     const step = this.generation;
     this.generation = undefined;

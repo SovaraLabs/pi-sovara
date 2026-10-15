@@ -189,6 +189,7 @@ export default function sovara(pi: ExtensionAPI): void {
     } catch (error) {
       report(ctx, error);
     }
+    if (active.retrievalExportError) report(ctx, active.retrievalExportError);
     active.context = structuredClone(messages);
     return { messages };
   });
@@ -217,9 +218,10 @@ export default function sovara(pi: ExtensionAPI): void {
       active.firstTokenAt = Date.now();
   });
   pi.on("message_end", async (event, ctx) => {
-    if (event.message.role === "assistant")
+    const message = event.message;
+    if (message.role === "assistant")
       await guarded(ctx, async () => {
-        await recorder?.endGeneration(event.message);
+        await recorder?.endGeneration(message);
       });
   });
   pi.on("tool_execution_start", async (event, ctx) => {

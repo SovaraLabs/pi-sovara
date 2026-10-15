@@ -207,3 +207,21 @@ test("compaction produces one summary observation without a dangling model step"
     await h.close();
   }
 });
+
+test("successful lessons are injected while trace failure remains visible", async () => {
+  const h = await harness();
+  try {
+    await h.start();
+    await h.prompt();
+    h.backend.reject("/internal/runner/llm/finalize");
+    const result = await h.emit("context_with_system", {
+      messages: [{ role: "user", content: "task", timestamp: 1 }],
+    });
+    assert.match(JSON.stringify(result.messages), /Use a deterministic clock/);
+    h.backend.reject("");
+    await h.emit("agent_settled");
+    assert.equal(h.statuses.at(-1), "sovara: export incomplete");
+  } finally {
+    await h.close();
+  }
+});
