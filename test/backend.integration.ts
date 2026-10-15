@@ -132,6 +132,15 @@ test(
           "Sovara lesson retrieval",
       );
       assert.ok(retrieval);
+      const retrievalOutput = JSON.parse(retrieval.output_json);
+      assert.equal(
+        retrievalOutput.raw.tool_output.retrieval_status,
+        "complete",
+      );
+      assert.equal(retrieval.display_output.retrieval_status, "complete");
+      assert.ok(retrieval.display_output.warning_message);
+      const tool = tree.steps.find((step: any) => step.name === "Read");
+      assert.match(JSON.stringify(tool.display_output), /example contents/);
       assert.equal(input.raw.lesson_retrieval.step_uuid, retrieval.step_uuid);
       assert.equal(input.raw.lesson_retrieval.result, undefined);
       assert.equal(llm.input_tokens, 12);

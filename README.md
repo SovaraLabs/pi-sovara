@@ -160,6 +160,11 @@ Images remain in captured context/payloads; there is no separate media-upload in
 
 Writes have timeouts. The footer says “turn export acknowledged” only after successful API calls;
 it does not claim durable persistence or exactly-once delivery. Failures show “export incomplete”.
+Lesson retrieval is recorded as an automatic tool step so its query and result can be inspected;
+it is not a tool selected by the model. Retrieval warnings appear in Pi and under `/sovara`,
+and are retained in that step's output. A successful export does not mean lessons were injected.
+For example, if Sovara reports an unverified Fast Helper Model, configure and verify that model
+in Sovara before trying the prompt again. Pi's own model login does not configure Sovara's helper.
 Headless sessions get a metadata-only stderr warning. There is no offline spool/backfill. A hard
 process kill or unreachable server can lose observations. Inspect `/sovara` for status and reload
 after repairing a failed initial connection. Remove/disable the extension with Pi's package controls

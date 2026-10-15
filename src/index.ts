@@ -33,6 +33,7 @@ function inheritedParent(): Parent | undefined {
 export default function sovara(pi: ExtensionAPI): void {
   let recorder: Recorder | undefined;
   let operationFailed = false;
+  let lastRetrievalWarning: string | undefined;
   let summaryCapture:
     | { started: number; payload?: unknown; signal?: AbortSignal }
     | undefined;
@@ -80,7 +81,7 @@ export default function sovara(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       ctx.ui.notify(
         recorder
-          ? `Project: ${recorder.config.projectName}\nRecording: ${recorder.scope ? "active" : "idle"}${operationFailed ? "\nA Sovara operation failed; export may be incomplete." : ""}`
+          ? `Project: ${recorder.config.projectName}\nRecording: ${recorder.scope ? "active" : "idle"}${recorder.retrievalWarning ? `\nLessons: ${recorder.retrievalWarning}` : ""}${operationFailed ? "\nA Sovara operation failed; export may be incomplete." : ""}`
           : "Sovara is unavailable. Check your connection and reload.",
         "info",
       );
@@ -92,6 +93,7 @@ export default function sovara(pi: ExtensionAPI): void {
     await guarded(ctx, async () => {
       await cleanup();
       operationFailed = false;
+      lastRetrievalWarning = undefined;
       const config = await loadConfig(
         ctx.cwd,
         undefined,
@@ -172,6 +174,12 @@ export default function sovara(pi: ExtensionAPI): void {
     let messages = cleanMessages(event.messages);
     await guarded(ctx, async () => {
       messages = await active.prepareContext(messages, ctx.signal);
+      const warning = active.retrievalWarning;
+      if (warning && warning !== lastRetrievalWarning) {
+        if (ctx.hasUI) ctx.ui.notify(`Sovara: ${warning}`, "warning");
+        else console.error(`[sovara-pi] ${warning}`);
+      }
+      lastRetrievalWarning = warning;
     });
     return { messages };
   });
@@ -233,7 +241,11 @@ export default function sovara(pi: ExtensionAPI): void {
     if (recorder)
       status(
         ctx,
-        operationFailed ? "export incomplete" : "turn export acknowledged",
+        operationFailed
+          ? "export incomplete"
+          : recorder.retrievalWarning
+            ? "turn export acknowledged · lesson retrieval warning"
+            : "turn export acknowledged",
       );
   });
   pi.on("session_shutdown", async (_event, ctx) => {

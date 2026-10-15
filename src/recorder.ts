@@ -46,6 +46,7 @@ export function withUsage(value: unknown): unknown {
 
 export class Recorder {
   scope?: Scope;
+  retrievalWarning?: string;
   private generation?: Step;
   private readonly tools = new Map<string, Step>();
   private context: AgentMessage[] = [];
@@ -135,6 +136,7 @@ export class Recorder {
   }
 
   async retrieve(context: string, signal?: AbortSignal): Promise<Retrieval> {
+    this.retrievalWarning = undefined;
     this.turnSignal = signal ?? this.turnSignal;
     signal?.throwIfAborted();
     const scope = this.scope;
@@ -156,6 +158,12 @@ export class Recorder {
     try {
       signal?.throwIfAborted();
       result = await this.client.retrieve(scope, context, signal);
+      this.retrievalWarning =
+        result.warning_message ||
+        result.error_message ||
+        (result.retrieval_status === "failed"
+          ? "Lesson retrieval failed."
+          : undefined);
       this.retrieval = {
         status: result.retrieval_status,
         query: context,
@@ -178,7 +186,13 @@ export class Recorder {
     }
     if (step) {
       const exported = await this.attemptExport(async () => {
-        await this.client.finish(step, result, undefined, undefined, signal);
+        await this.client.finish(
+          step,
+          result,
+          result.retrieval_status === "failed" ? "RetrievalFailed" : undefined,
+          undefined,
+          signal,
+        );
         return true;
       });
       // Keep full fallback evidence until the observation export is acknowledged.

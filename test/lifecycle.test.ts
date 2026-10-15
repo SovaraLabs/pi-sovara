@@ -28,11 +28,15 @@ async function harness(parent?: string) {
   let entries: any[] = [];
   let sessionId = "session-1";
   const statuses: string[] = [];
+  const notifications: string[] = [];
+  const commands = new Map<string, any>();
   const api = {
     on(name: string, callback: any) {
       handlers.set(name, callback);
     },
-    registerCommand() {},
+    registerCommand(name: string, command: any) {
+      commands.set(name, command);
+    },
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data });
     },
@@ -45,7 +49,9 @@ async function harness(parent?: string) {
     model: { id: "test", provider: "test" },
     ui: {
       setStatus: (_key: string, value: string) => statuses.push(value),
-      notify() {},
+      notify(message: string) {
+        notifications.push(message);
+      },
     },
     sessionManager: {
       getEntries: () => entries,
@@ -60,6 +66,8 @@ async function harness(parent?: string) {
     backend,
     cwd,
     statuses,
+    notifications,
+    command: (name: string) => commands.get(name).handler("", ctx),
     emit,
     ctx,
     async config(projectName: string) {
@@ -286,6 +294,80 @@ test("failed standalone summary closes its turn and resets capture before normal
       h.backend.calls.filter((call) => call.path.endsWith("/retrieve")).length,
       1,
     );
+  } finally {
+    await h.close();
+  }
+});
+
+test("skipped lesson retrieval preserves its warning in traces and Pi without repeated alerts", async () => {
+  const h = await harness();
+  const warning = "Lesson injection skipped. Missing: Fast Helper Model.";
+  try {
+    h.backend.retrieval({
+      lessons: [],
+      rendered_lessons_block: "",
+      retrieval_status: "complete",
+      warning_message: warning,
+    });
+    await h.start();
+    await h.prompt();
+    const messages = [{ role: "user", content: "Add Micron?", timestamp: 1 }];
+    for (let i = 0; i < 2; i++) {
+      const result = await h.emit("context_with_system", { messages });
+      assert.deepEqual(result.messages, messages);
+    }
+    assert.deepEqual(h.notifications, [`Sovara: ${warning}`]);
+    const retrieval = h.backend.calls.find((c) =>
+      c.path.endsWith("/finalize"),
+    )!;
+    assert.equal(
+      JSON.parse(retrieval.body.output_json).raw.tool_output.warning_message,
+      warning,
+    );
+    await h.emit("agent_settled");
+    assert.match(h.statuses.at(-1)!, /lesson retrieval warning/);
+    await h.command("sovara");
+    assert.match(h.notifications.at(-1)!, /Lessons: .*Fast Helper Model/);
+
+    h.backend.retrieval({
+      lessons: [],
+      rendered_lessons_block: "",
+      retrieval_status: "complete",
+    });
+    await h.prompt();
+    await h.emit("context_with_system", { messages });
+    await h.emit("agent_settled");
+    assert.equal(h.statuses.at(-1), "sovara: turn export acknowledged");
+    await h.command("sovara");
+    assert.doesNotMatch(h.notifications.at(-1)!, /Fast Helper Model/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a failed retrieval response is recorded as failure while Pi continues", async () => {
+  const h = await harness();
+  try {
+    h.backend.retrieval({
+      lessons: [],
+      rendered_lessons_block: "",
+      retrieval_status: "failed",
+      error_message: "retrieval_unavailable",
+    });
+    await h.start();
+    await h.prompt();
+    const messages = [{ role: "user", content: "task", timestamp: 1 }];
+    assert.deepEqual(
+      (await h.emit("context_with_system", { messages })).messages,
+      messages,
+    );
+    assert.deepEqual(h.notifications, ["Sovara: retrieval_unavailable"]);
+    const retrieval = h.backend.calls.find((c) =>
+      c.path.endsWith("/finalize"),
+    )!;
+    assert.equal(retrieval.body.status, "error");
+    await h.emit("agent_settled");
+    assert.match(h.statuses.at(-1)!, /lesson retrieval warning/);
   } finally {
     await h.close();
   }

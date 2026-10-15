@@ -75,7 +75,11 @@ test("structured run I/O and step payloads redact before JSON encoding", async (
       for (const key of ["turn_input", "value", "input_json", "output_json"]) {
         if (!(key in call.body)) continue;
         const decoded = JSON.parse(call.body[key]);
-        const parts = Array.isArray(decoded) ? decoded : decoded.raw;
+        const parts = Array.isArray(decoded)
+          ? decoded
+          : key === "output_json"
+            ? decoded.raw.tool_output
+            : decoded.raw;
         assert.equal(parts[0].arguments.api_key, "[REDACTED]");
         assert.equal(parts[0].text, "[REDACTED]");
       }

@@ -9,6 +9,7 @@ export async function fixtureServer() {
   let blockedPath = "";
   let reached: (() => void) | undefined;
   let versions: unknown = [4];
+  let retrieval: unknown;
   const server = createServer(async (req, res) => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
@@ -60,7 +61,7 @@ export async function fixtureServer() {
         response = { step_uuid: body.step_uuid, step_kind: body.step_kind };
         break;
       case "/internal/lessons/retrieve":
-        response = {
+        response = retrieval ?? {
           lessons: [
             {
               lesson_id: "lesson-1",
@@ -100,6 +101,9 @@ export async function fixtureServer() {
     },
     versions(value: unknown) {
       versions = value;
+    },
+    retrieval(value: unknown) {
+      retrieval = value;
     },
     async close() {
       await new Promise<void>((resolve) => {

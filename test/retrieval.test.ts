@@ -199,6 +199,8 @@ test("retrieval rejects malformed responses at the boundary", async () => {
     null,
     [],
     { ...valid, retrieval_status: undefined },
+    { ...valid, warning_message: { malformed: true } },
+    { ...valid, error_message: 123 },
     { ...valid, lessons: [null] },
     { ...valid, lessons: [{ lesson_id: "id", content: "body" }] },
     { ...valid, lessons: [{ lesson_id: "", title: "t", content: "body" }] },
@@ -211,6 +213,15 @@ test("retrieval rejects malformed responses at the boundary", async () => {
     lessons: [{ ...valid.lessons[0], debug_blob: "unneeded" }],
   };
   assert.deepEqual(await client.retrieve(scope, "query"), valid);
+  payload = {
+    ...valid,
+    warning_message: "Missing Fast Helper Model token",
+    error_message: null,
+  };
+  assert.deepEqual(await client.retrieve(scope, "query"), {
+    ...valid,
+    warning_message: "Missing Fast Helper Model [REDACTED]",
+  });
 });
 
 test("usage normalization only copies numeric fields", () => {

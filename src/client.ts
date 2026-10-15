@@ -23,6 +23,8 @@ export interface Retrieval {
   lessons: Lesson[];
   rendered_lessons_block: string;
   retrieval_status: string;
+  warning_message?: string;
+  error_message?: string;
 }
 export interface Step {
   id: string;
@@ -328,10 +330,19 @@ export class SovaraClient {
         content: lesson.content,
       };
     });
+    const diagnostics: Pick<Retrieval, "warning_message" | "error_message"> =
+      {};
+    for (const key of ["warning_message", "error_message"] as const) {
+      if (payload[key] == null) continue;
+      if (typeof payload[key] !== "string")
+        throw new SovaraError("invalid_retrieval");
+      diagnostics[key] = this.sanitize(payload[key], scope.recording) as string;
+    }
     return {
       lessons,
       rendered_lessons_block: payload.rendered_lessons_block,
       retrieval_status: payload.retrieval_status,
+      ...diagnostics,
     };
   }
 
@@ -379,7 +390,10 @@ export class SovaraClient {
         api_type: step.api,
         step_kind: step.kind,
         input_json: this.wrapped(step.input, step.scope.recording, step.api),
-        output_json: this.wrapped(output, step.scope.recording),
+        output_json: this.wrapped(
+          step.api === "sovara.trace" ? { tool_output: output } : output,
+          step.scope.recording,
+        ),
         status: errorType ? "error" : "success",
         error_json: errorType
           ? JSON.stringify({ type: errorType, message: errorType })

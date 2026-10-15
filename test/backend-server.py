@@ -1,6 +1,7 @@
 """Isolated real Sovara backend for the optional integration test. No model calls."""
 
 import os
+import json
 import socket
 import tempfile
 from unittest.mock import patch
@@ -26,13 +27,20 @@ os.environ["SOVARA_DISABLE_DEFAULT_DB_SEED"] = "1"
 import uvicorn
 from sovara_exec_server.app import create_app
 from sovara_server_common.database import DB
+from sovara_server_common.stream_reconstruction import effective_output_to_show
 
 app = create_app(disable_inactivity_timeout=True)
 
 
 @app.get("/health/test-run/{run_id}")
 def inspect(run_id: str):
-    return DB.get_run_tree(run_id, with_turns=True).model_dump(mode="json")
+    tree = DB.get_run_tree(run_id, with_turns=True).model_dump(mode="json")
+    for step in tree["steps"]:
+        if step.get("output_json"):
+            step["display_output"] = effective_output_to_show(
+                json.loads(step["output_json"]), step["api_type"], rebuild_from_raw=True
+            )
+    return tree
 
 
 sock = socket.socket()
