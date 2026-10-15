@@ -62,8 +62,8 @@ The server environment override takes precedence over the user-level URL.
 | Mode                  | Behavior                                                                                                                                                                     |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `automatic` (default) | Before each normal agent model call, retrieve using its current Pi transcript and append a request-local lesson message. No model decision or MCP call is needed.            |
-| `mcp-reminder`        | Make Sovara retrieval available through MCP and append a request-local reminder. Suppress it after a retrieval result; re-arm it after new user input or other tool results. |
-| `mcp-system`          | Make the same MCP tool available and add a standing system instruction. No per-step reminder or automatic retrieval.                                                         |
+| `mcp-reminder`        | Append a request-local reminder to use your configured Sovara MCP server. Suppress it after a retrieval result; re-arm it after new user input or other tool results. |
+| `mcp-system`          | Add a standing system instruction to use your configured Sovara MCP server. No per-step reminder or automatic retrieval.                                                         |
 
 Inside Pi:
 
@@ -86,17 +86,23 @@ portion if needed. Injection is capped at approximately 12,000 characters; overs
 omitted whole. Both truncation decisions and the exact injected lesson IDs/text are recorded.
 Other extensions registered later can still transform the context or provider payload.
 
-In the MCP modes, the plugin registers a **local, authenticated MCP adapter** with Pi's built-in
-MCP support. It exposes only `mcp__sovara__retrieve({ context })`, directly to the model. This is
-a lesson-only adapter, not the full Sovara administration MCP server. It forwards to the same
-Sovara retrieval endpoint used by automatic mode, using the active recording's credentials.
-The model cannot supply a project selector. No separate MCP login is needed. An existing server
-named `sovara` must be renamed to avoid Pi overriding this binding. Built-in MCP must be enabled.
+For the MCP modes, connect Pi to **Sovara's existing remote MCP server** using Pi's
+normal MCP configuration and authentication. The extension does not start, register, configure,
+or authenticate any MCP server. Name the configured server `sovara` and expose its `retrieve`
+tool directly so the reminder hook recognizes `mcp__sovara__retrieve` results. Select the intended
+project through the remote tool's normal arguments; the recording project does not automatically
+bind an independently configured MCP connection. See [Sovara MCP setup](https://docs.sovara-labs.com/mcp/overview).
 
-Retrieval is allowed up to 15 seconds; failures leave the agent running without added lessons
-and are surfaced in the status. MCP reminders are instructions, not enforced tool calls.
-Sovara retrieval itself can consume configured model quota. All modes respect the backend's
-project lesson settings and the recording's settings snapshot.
+Automatic mode calls `/internal/lessons/retrieve` directly using the active recording's credentials.
+It needs no MCP connection. The TypeScript SDK currently has no public standalone retrieval client;
+its lesson injection is coupled to transport instrumentation, so this extension uses its narrow
+HTTP client instead. Disable the separately configured MCP server when comparing automatic mode
+if you want to exclude model-requested MCP retrieval from that experiment.
+
+Automatic retrieval is allowed up to 15 seconds; failures leave the agent running without added
+lessons and are surfaced in the status. MCP reminders are instructions, not enforced tool calls.
+Sovara retrieval itself can consume configured model quota. Automatic retrieval uses the recording's
+project settings snapshot; remote MCP retrieval uses its own connection and selected project.
 
 ## Tracing
 
@@ -150,8 +156,9 @@ npm run check
 npm pack --dry-run
 ```
 
-Tests include Pi's actual extension loader and agent loop with a synthetic provider, plus a real
-MCP client/server transport. They verify all three modes without paid model calls.
+Tests include Pi's actual extension loader and agent loop with a synthetic provider. They verify
+automatic API retrieval and both instruction modes without paid model calls. Remote MCP setup and
+transport are owned by Pi and are not exercised by this suite.
 
 An optional test runs the real Sovara exec server against a temporary database and verifies persisted
 turns, steps, token usage, project creation and session continuation:

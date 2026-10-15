@@ -34,10 +34,6 @@
     "check": "npm run typecheck && npm test",
     "prepublishOnly": "npm run check"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.28.0",
-    "zod": "^4.0.0"
-  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=1.2.0 <2"
   },

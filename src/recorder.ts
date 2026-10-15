@@ -52,28 +52,24 @@ export class Recorder {
 
   async retrieve(
     context: string,
-    automatic: boolean,
     signal?: AbortSignal,
   ): Promise<Retrieval> {
     const scope = this.scope;
     if (!scope?.turnId) throw new Error("No active Sovara turn");
-    const step = automatic
-      ? await this.client.prepare(scope, "sovara.trace", "tool", {
-          tool_name: "Sovara lesson retrieval",
-          context,
-          source: "pi-extension",
-          lesson_mode: this.config.lessonMode,
-        })
-      : undefined;
+    const step = await this.client.prepare(scope, "sovara.trace", "tool", {
+      tool_name: "Sovara lesson retrieval",
+      context,
+      source: "pi-extension",
+      lesson_mode: this.config.lessonMode,
+    });
     try {
       const result = await this.client.retrieve(scope, context, signal);
       this.retrieval = { mode: this.config.lessonMode, query: context, result };
-      if (step) await this.client.finish(step, result);
+      await this.client.finish(step, result);
       return result;
     } catch (error) {
       this.retrieval = { mode: this.config.lessonMode, status: "failed" };
-      if (step)
-        await this.client.finish(step, { status: "failed" }, "RetrievalFailed");
+      await this.client.finish(step, { status: "failed" }, "RetrievalFailed");
       throw error;
     }
   }

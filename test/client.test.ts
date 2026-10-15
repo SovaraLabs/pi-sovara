@@ -35,7 +35,7 @@ test("records resume, retrieval, provider retries, parallel tools, and exact tur
       "/repo",
     );
     await recorder.start("first prompt");
-    await recorder.retrieve("current model input", true);
+    await recorder.retrieve("current model input");
     recorder.context = [{ role: "user", content: "with lessons" }];
     await recorder.beginGeneration(
       { messages: ["actual provider payload"] },

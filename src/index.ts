@@ -3,7 +3,6 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
-  assertMcpNameAvailable,
   loadConfig,
   mode,
   saveMode,
@@ -11,7 +10,6 @@ import {
 } from "./config.ts";
 import { SovaraClient, SovaraError, type Scope } from "./client.ts";
 import { Recorder, withUsage } from "./recorder.ts";
-import { startLessonBridge, type LessonBridge } from "./mcp.ts";
 import {
   cleanMessages,
   lessonBlock,
@@ -53,7 +51,6 @@ function inheritedParent(): Parent | undefined {
 
 export default function sovara(pi: ExtensionAPI): void {
   let recorder: Recorder | undefined;
-  let bridge: LessonBridge | undefined;
   let exportFailed = false;
   let summaryPending = false;
   let summaryStartedAt: number | undefined;
@@ -88,16 +85,7 @@ export default function sovara(pi: ExtensionAPI): void {
     restoreParent();
     const previous = recorder;
     recorder = undefined;
-    try {
-      await previous?.close("SessionClosed");
-    } finally {
-      if (bridge) {
-        pi.unregisterMcpServer("sovara");
-        const old = bridge;
-        bridge = undefined;
-        await old.close();
-      }
-    }
+    await previous?.close("SessionClosed");
   }
 
   pi.registerCommand("sovara", {
@@ -169,8 +157,6 @@ export default function sovara(pi: ExtensionAPI): void {
         config.projectName = parent.projectName;
         config.lessonMode = parent.lessonMode;
       }
-      if (config.lessonMode !== "automatic")
-        await assertMcpNameAvailable(ctx.cwd, ctx.isProjectTrusted());
       const client = new SovaraClient(config);
       if (parent) client.protect(parent.scope.recording.run_write_token);
       await client.connect();
@@ -187,20 +173,6 @@ export default function sovara(pi: ExtensionAPI): void {
         pi.appendEntry(CONFIG_ENTRY, {
           projectName: config.projectName,
           lessonMode: config.lessonMode,
-        });
-      }
-      if (config.lessonMode !== "automatic") {
-        if (pi.getMcpServers().some((server) => server.name === "sovara"))
-          throw new Error("Sovara MCP name is already registered");
-        bridge = await startLessonBridge(async (context, signal) => {
-          if (!recorder?.scope) throw new Error("No active Sovara turn");
-          return recorder.retrieve(context, false, signal);
-        });
-        client.protect(bridge.token);
-        pi.registerMcpServer("sovara", {
-          url: bridge.url,
-          headers: { Authorization: `Bearer ${bridge.token}` },
-          exposure: "direct",
         });
       }
       status(ctx, `${config.projectName} · ${config.lessonMode}`);
@@ -245,7 +217,7 @@ export default function sovara(pi: ExtensionAPI): void {
     try {
       if (active.config.lessonMode === "automatic") {
         const query = retrievalContext(messages);
-        const result = await active.retrieve(query.context, true, ctx.signal);
+        const result = await active.retrieve(query.context, ctx.signal);
         const block = lessonBlock(result);
         active.retrieval = {
           ...active.retrieval,

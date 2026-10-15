@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   createAgentSession,
-  createMcpExtension,
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
@@ -76,14 +75,9 @@ for (const lessonMode of MODES) {
               const call:
                 | { name: string; arguments: Record<string, string> }
                 | undefined =
-                current === 0 && lessonMode !== "automatic"
-                  ? {
-                      name: "mcp__sovara__retrieve",
-                      arguments: { context: "How should I test this?" },
-                    }
-                  : current === (lessonMode === "automatic" ? 0 : 1)
-                    ? { name: "read", arguments: { path: "input.txt" } }
-                    : undefined;
+                current === 0
+                  ? { name: "read", arguments: { path: "input.txt" } }
+                  : undefined;
               const message: AssistantMessage = {
                 role: "assistant",
                 api: "sovara-test-api",
@@ -138,15 +132,6 @@ for (const lessonMode of MODES) {
         cwd,
         agentDir,
         settingsManager: settings,
-        extensionFactories: [
-          {
-            name: "mcp",
-            factory: createMcpExtension({
-              loadConfig: () => ({ servers: [], errors: [] }),
-              logPath: join(agentDir, "mcp.log"),
-            }),
-          },
-        ],
         additionalExtensionPaths: [resolve("src/index.ts")],
         noSkills: true,
         noPromptTemplates: true,
@@ -164,7 +149,7 @@ for (const lessonMode of MODES) {
         resourceLoader: loader,
         settingsManager: settings,
         sessionManager: SessionManager.inMemory(cwd),
-        tools: ["read", "mcp__sovara__retrieve"],
+        tools: ["read"],
       });
       session = created.session;
       const errors: unknown[] = [];
@@ -176,11 +161,11 @@ for (const lessonMode of MODES) {
       });
       await session.prompt("Inspect input.txt and explain how to test it.");
       assert.deepEqual(errors, []);
-      assert.equal(inputs.length, lessonMode === "automatic" ? 2 : 3);
+      assert.equal(inputs.length, 2);
       const retrievals = server.calls.filter(
         (c) => c.path === "/internal/lessons/retrieve",
       );
-      assert.equal(retrievals.length, lessonMode === "automatic" ? 2 : 1);
+      assert.equal(retrievals.length, lessonMode === "automatic" ? 2 : 0);
       const finalized = server.calls.filter((c) =>
         c.path.endsWith("/finalize"),
       );
@@ -201,12 +186,8 @@ for (const lessonMode of MODES) {
           JSON.stringify(inputs[0]),
           /Before proceeding with substantive work/,
         );
-        assert.doesNotMatch(
-          JSON.stringify(inputs[1]),
-          /Before proceeding with substantive work/,
-        );
         assert.match(
-          JSON.stringify(inputs[2]),
+          JSON.stringify(inputs[1]),
           /Before proceeding with substantive work/,
         );
       } else {

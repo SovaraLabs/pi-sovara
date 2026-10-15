@@ -57,7 +57,6 @@ test(
       const runId = recorder.scope!.recording.run_id;
       const lessons = await recorder.retrieve(
         "Synthetic task with no lessons",
-        true,
       );
       assert.equal(lessons.lessons.length, 0);
       await recorder.beginGeneration(

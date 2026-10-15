@@ -118,27 +118,6 @@ export async function loadConfig(
   return { projectName: projectName.trim(), lessonMode, execUrl, authHeaders };
 }
 
-export async function assertMcpNameAvailable(
-  cwd: string,
-  projectTrusted: boolean,
-): Promise<void> {
-  const files = [
-    join(
-      process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
-      "mcp.json",
-    ),
-  ];
-  if (projectTrusted) files.push(join(cwd, ".pi", "mcp.json"));
-  for (const file of files) {
-    const mcp = await readJson(file);
-    if ((mcp?.mcpServers as Record<string, unknown> | undefined)?.sovara) {
-      throw new Error(
-        "Rename the existing sovara MCP server before enabling the project-bound adapter",
-      );
-    }
-  }
-}
-
 export async function saveMode(
   cwd: string,
   lessonMode: LessonMode,

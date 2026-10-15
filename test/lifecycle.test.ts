@@ -11,6 +11,10 @@ async function harness(parent?: string) {
   const backend = await fixtureServer();
   const cwd = await mkdtemp(join(tmpdir(), "pi-lifecycle-"));
   await mkdir(join(cwd, ".pi"));
+  // A normal user-managed MCP connection must not conflict with the plugin.
+  await writeFile(join(cwd, ".pi", "mcp.json"), JSON.stringify({
+    mcpServers: { sovara: { url: "https://example.invalid/mcp" } },
+  }));
   const previous = {
     SOVARA_EXEC_SERVER_URL: process.env.SOVARA_EXEC_SERVER_URL,
     PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
@@ -29,7 +33,6 @@ async function harness(parent?: string) {
   let entries: any[] = [];
   let sessionId = "session-1";
   const statuses: string[] = [];
-  const mcp = new Map<string, any>();
   const api = {
     on(name: string, callback: any) {
       handlers.set(name, callback);
@@ -39,15 +42,6 @@ async function harness(parent?: string) {
     },
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data });
-    },
-    getMcpServers() {
-      return [...mcp.entries()].map(([name, config]) => ({ name, config }));
-    },
-    registerMcpServer(name: string, config: unknown) {
-      mcp.set(name, config);
-    },
-    unregisterMcpServer(name: string) {
-      mcp.delete(name);
     },
   } as unknown as ExtensionAPI;
   const ctx = {
@@ -76,7 +70,6 @@ async function harness(parent?: string) {
     emit,
     commands,
     ctx,
-    mcp,
     async config(lessonMode: string) {
       await writeFile(
         join(cwd, ".pi", "sovara.json"),
@@ -117,12 +110,10 @@ test("mode change applies to new sessions while resume keeps its assignment", as
     await h.emit("session_shutdown", { reason: "reload" });
     await h.emit("session_start", { reason: "resume" });
     assert.match(h.statuses.at(-1)!, /automatic/);
-    assert.equal(h.mcp.size, 0);
     await h.emit("session_shutdown", { reason: "new" });
     h.newSession();
     await h.emit("session_start", { reason: "new" });
     assert.match(h.statuses.at(-1)!, /mcp-system/);
-    assert.equal(h.mcp.size, 1);
   } finally {
     await h.close();
   }

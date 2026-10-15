@@ -22,25 +22,25 @@ test("credential fields and known secrets are masked without removing token coun
   );
 });
 
-test("captured bodies redact adapter and recording credentials; auth remains usable", async () => {
+test("captured bodies redact inherited and recording credentials; auth remains usable", async () => {
   const backend = await fixtureServer();
   try {
     const client = new SovaraClient(backend.config);
-    client.protect("bridge-secret");
+    client.protect("parent-secret");
     await client.connect();
     const recording = await client.register("session", "/repo");
     const scope = await client.turn(recording, "task");
     const step = await client.prepare(scope, "sovara.trace", "tool", {
       api_key: "provider-secret",
-      content: "bridge-secret recording-secret agent-secret",
+      content: "parent-secret recording-secret agent-secret",
     });
-    await client.finish(step, "bridge-secret recording-secret");
+    await client.finish(step, "parent-secret recording-secret");
     for (const call of backend.calls.filter((c) =>
       /prepare|finalize/.test(c.path),
     )) {
       assert.doesNotMatch(
         JSON.stringify(call.body),
-        /bridge-secret|recording-secret|agent-secret|provider-secret/,
+        /parent-secret|recording-secret|agent-secret|provider-secret/,
       );
       assert.equal(call.headers["x-sovara-run-token"], "recording-secret");
     }
