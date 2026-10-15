@@ -18,11 +18,26 @@ export interface Lesson {
   lesson_id: string;
   title: string;
   content: string;
+  summary?: string;
+  when_to_use?: string;
+  path?: string;
+}
+export interface LessonMetadata {
+  applied_lessons: Lesson[];
+  rendered_lessons_block: string;
+  retrieval_status: "pending" | "complete" | "failed";
+  retrieval_latency_ms?: number;
+  model?: string;
+  latency_tier?: string;
+  warning_message?: string;
+  error_message?: string;
 }
 export interface Retrieval {
   lessons: Lesson[];
+  model_used?: string;
+  latency_tier?: string;
   rendered_lessons_block: string;
-  retrieval_status: string;
+  retrieval_status: "pending" | "complete" | "failed";
   warning_message?: string;
   error_message?: string;
 }
@@ -33,6 +48,7 @@ export interface Step {
   kind: string;
   input: unknown;
   started: number;
+  lessonMetadata?: LessonMetadata;
 }
 
 export class SovaraError extends Error {
@@ -95,13 +111,12 @@ export class SovaraClient {
 
   private wrapped(value: unknown, recording: Recording, api?: string): string {
     const raw = this.sanitize(value, recording);
-    // Display/analysis retains normalized messages; provider and retrieval evidence live in raw.
+    // Display/analysis retains normalized messages without duplicating the provider payload.
     const to_show =
       api === "pi.llm"
         ? Object.fromEntries(
             Object.entries(object(raw)).filter(
-              ([key]) =>
-                key !== "provider_payload" && key !== "lesson_retrieval",
+              ([key]) => key !== "provider_payload",
             ),
           )
         : raw;
@@ -313,8 +328,9 @@ export class SovaraClient {
     if (
       !Array.isArray(payload.lessons) ||
       typeof payload.rendered_lessons_block !== "string" ||
-      typeof payload.retrieval_status !== "string" ||
-      !payload.retrieval_status
+      (payload.retrieval_status !== "pending" &&
+        payload.retrieval_status !== "complete" &&
+        payload.retrieval_status !== "failed")
     )
       throw new SovaraError("invalid_retrieval");
     const lessons = payload.lessons.map((value: unknown): Lesson => {
@@ -324,15 +340,30 @@ export class SovaraClient {
         typeof lesson.content !== "string"
       )
         throw new SovaraError("invalid_retrieval");
+      const details: Pick<Lesson, "summary" | "when_to_use" | "path"> = {};
+      for (const key of ["summary", "when_to_use", "path"] as const) {
+        if (lesson[key] == null) continue;
+        if (typeof lesson[key] !== "string")
+          throw new SovaraError("invalid_retrieval");
+        details[key] = lesson[key];
+      }
       return {
+        ...details,
         lesson_id: field(lesson, "lesson_id"),
         title: lesson.title,
         content: lesson.content,
       };
     });
-    const diagnostics: Pick<Retrieval, "warning_message" | "error_message"> =
-      {};
-    for (const key of ["warning_message", "error_message"] as const) {
+    const diagnostics: Pick<
+      Retrieval,
+      "warning_message" | "error_message" | "model_used" | "latency_tier"
+    > = {};
+    for (const key of [
+      "warning_message",
+      "error_message",
+      "model_used",
+      "latency_tier",
+    ] as const) {
       if (payload[key] == null) continue;
       if (typeof payload[key] !== "string")
         throw new SovaraError("invalid_retrieval");
@@ -378,7 +409,6 @@ export class SovaraClient {
     step: Step,
     output: unknown,
     errorType?: string,
-    metadata?: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<void> {
     await this.request(
@@ -399,7 +429,7 @@ export class SovaraClient {
           ? JSON.stringify({ type: errorType, message: errorType })
           : null,
         latency_seconds: (Date.now() - step.started) / 1000,
-        lesson_metadata: metadata ?? null,
+        lesson_metadata: step.lessonMetadata ?? null,
       },
       step.scope.recording,
       signal,

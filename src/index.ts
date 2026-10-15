@@ -288,7 +288,6 @@ export default function sovara(pi: ExtensionAPI): void {
           (entry as { status?: string }).status === "error"
             ? "SummaryFailed"
             : undefined,
-          undefined,
           signal,
         );
       } finally {

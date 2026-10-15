@@ -134,6 +134,8 @@ export function lessonBlock(result: Retrieval): {
   ids: string[];
   truncated: boolean;
 } {
+  if (result.retrieval_status !== "complete")
+    return { text: "", ids: [], truncated: false };
   const parts: string[] = [];
   const ids: string[] = [];
   let remaining = 12000;

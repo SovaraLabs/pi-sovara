@@ -35,8 +35,7 @@ test("records resume, retrieval, provider retries, parallel tools, and exact tur
       "/repo",
     );
     await recorder.start("first prompt");
-    await recorder.retrieve("current model input");
-    recorder.setContext([
+    await recorder.prepareContext([
       { role: "user", content: "with lessons", timestamp: 1 },
     ]);
     await recorder.beginGeneration(
@@ -83,12 +82,12 @@ test("records resume, retrieval, provider retries, parallel tools, and exact tur
     const preparations = server.calls.filter((c) =>
       c.path.endsWith("/prepare"),
     );
-    assert.equal(preparations.length, 5);
+    assert.equal(preparations.length, 4);
     assert.ok(
       preparations.every((c) => c.body.prepare_runtime_lessons === false),
     );
     const finalized = server.calls.filter((c) => c.path.endsWith("/finalize"));
-    assert.equal(finalized.length, 5);
+    assert.equal(finalized.length, 4);
     assert.equal(finalized.filter((c) => c.body.status === "error").length, 2);
     for (const finish of finalized) {
       const prepare = preparations.find(
@@ -98,12 +97,19 @@ test("records resume, retrieval, provider retries, parallel tools, and exact tur
       assert.equal(finish.headers["x-sovara-run-token"], "recording-secret");
       assert.equal(finish.headers["x-sovara-agent-token"], undefined);
     }
-    const llm = JSON.parse(preparations[2].body.input_json).raw;
-    assert.equal(
-      llm.lesson_retrieval.step_uuid,
-      preparations[0].body.step_uuid,
+    const llm = JSON.parse(preparations[1].body.input_json).raw;
+    assert.equal(llm.lesson_retrieval, undefined);
+    for (const call of finalized.filter((c) => c.body.step_kind === "llm")) {
+      assert.deepEqual(
+        call.body.lesson_metadata.applied_lessons.map((l: any) => l.lesson_id),
+        ["lesson-1"],
+      );
+    }
+    assert.ok(
+      finalized
+        .filter((c) => c.body.step_kind !== "llm")
+        .every((c) => c.body.lesson_metadata === null),
     );
-    assert.equal(llm.lesson_retrieval.query, undefined);
     assert.deepEqual(llm.provider_payload.messages, ["retried payload"]);
   } finally {
     await server.close();
@@ -319,14 +325,12 @@ test("model display keeps normalized content without duplicating provider and re
     assert.deepEqual(raw.provider_payload.messages, messages);
     assert.equal(to_show.provider_payload, undefined);
     assert.equal(to_show.lesson_retrieval, undefined);
-    assert.equal(raw.lesson_retrieval.query, undefined);
-    assert.equal(raw.lesson_retrieval.result, undefined);
-    assert.deepEqual(raw.lesson_retrieval.injected_lesson_ids, ["lesson-1"]);
+    assert.equal(raw.lesson_retrieval, undefined);
     assert.equal(preparation.body.input_json.split(marker).length - 1, 3);
-    const retrieval = server.calls.find((call) =>
-      call.path.endsWith("/finalize"),
-    )!;
-    assert.equal(raw.lesson_retrieval.step_uuid, retrieval.body.step_uuid);
+    assert.equal(
+      server.calls.filter((c) => c.path.endsWith("/prepare")).length,
+      1,
+    );
     await recorder.close();
   } finally {
     await server.close();

@@ -25,7 +25,8 @@ test("real Pi loader retrieves and injects the conversation suffix", async () =>
   process.env.SOVARA_EXEC_SERVER_URL = server.config.execUrl;
   process.env.SOVARA_AGENT_TOKEN = "test-token";
   let session:
-    Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+    | Awaited<ReturnType<typeof createAgentSession>>["session"]
+    | undefined;
   try {
     await mkdir(join(cwd, ".pi"));
     await writeFile(
@@ -70,7 +71,8 @@ test("real Pi loader retrieves and injects the conversation suffix", async () =>
             );
             const current = index++;
             const call:
-              { name: string; arguments: Record<string, string> } | undefined =
+              | { name: string; arguments: Record<string, string> }
+              | undefined =
               current === 0
                 ? { name: "read", arguments: { path: "input.txt" } }
                 : undefined;
@@ -167,7 +169,20 @@ test("real Pi loader retrieves and injects the conversation suffix", async () =>
       finalized.filter((c) => c.body.step_kind === "llm").length,
       inputs.length,
     );
-    assert.ok(finalized.some((c) => c.body.step_kind === "tool"));
+    assert.equal(
+      finalized.filter((c) => c.body.step_kind === "tool").length,
+      1,
+    );
+    for (const call of finalized.filter((c) => c.body.step_kind === "llm")) {
+      assert.deepEqual(
+        call.body.lesson_metadata.applied_lessons.map((l: any) => l.lesson_id),
+        ["lesson-1"],
+      );
+      assert.match(
+        call.body.lesson_metadata.rendered_lessons_block,
+        /Use a deterministic clock/,
+      );
+    }
     assert.ok(server.calls.some((c) => c.path === "/runner/deregister"));
     const secondQuery = JSON.parse(retrievals[1]!.body.raw_context);
     assert.deepEqual(secondQuery.prefix, []);

@@ -1,4 +1,11 @@
-import type { SovaraClient, Scope, Step, Retrieval } from "./client.ts";
+import {
+  SovaraError,
+  type SovaraClient,
+  type Scope,
+  type Step,
+  type Retrieval,
+  type LessonMetadata,
+} from "./client.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Config } from "./config.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -8,16 +15,6 @@ import {
   referenceMessage,
   RetrievalSuffix,
 } from "./lessons.ts";
-
-interface RetrievalObservation {
-  status: string;
-  query?: string;
-  result?: Retrieval;
-  step_uuid?: string;
-  injected_lesson_ids?: string[];
-  query_truncated?: boolean;
-  injection_truncated?: boolean;
-}
 
 /** Pi reports uncached input separately, matching Sovara's normalized token columns. */
 export function withUsage(value: unknown): unknown {
@@ -50,7 +47,7 @@ export class Recorder {
   private generation?: Step;
   private readonly tools = new Map<string, Step>();
   private context: AgentMessage[] = [];
-  private retrieval?: RetrievalObservation;
+  private retrieval?: LessonMetadata;
   private readonly suffix: RetrievalSuffix;
   private readonly exportErrors: unknown[] = [];
   private firstTokenAt?: number;
@@ -86,16 +83,28 @@ export class Recorder {
     const query = this.suffix.context(clean);
     const result = await this.retrieve(query.context, signal);
     const block = lessonBlock(result);
+    const warnings = [result.warning_message];
+    if (query.truncated)
+      warnings.push(
+        "Earlier retrieval context was omitted to fit the size limit.",
+      );
+    if (block.truncated)
+      warnings.push(
+        "Some retrieved lessons were omitted to fit the injection size limit.",
+      );
     this.retrieval = {
       ...this.retrieval!,
-      injected_lesson_ids: block.ids,
-      query_truncated: query.truncated,
-      injection_truncated: block.truncated,
+      applied_lessons: block.ids.map(
+        (id) => result.lessons.find((lesson) => lesson.lesson_id === id)!,
+      ),
+      rendered_lessons_block: block.text,
+      warning_message: warnings.filter(Boolean).join("\n") || undefined,
     };
+    this.retrievalWarning =
+      this.retrieval.warning_message || this.retrieval.error_message;
     const prepared = block.text
       ? [...clean, referenceMessage(block.text)]
       : clean;
-    // Exact injected text is already in the captured context; keep it in one place.
     this.setContext(prepared);
     return prepared;
   }
@@ -138,72 +147,40 @@ export class Recorder {
   async retrieve(context: string, signal?: AbortSignal): Promise<Retrieval> {
     this.retrievalWarning = undefined;
     this.turnSignal = signal ?? this.turnSignal;
-    signal?.throwIfAborted();
-    const scope = this.scope;
-    if (!scope?.turnId) throw new Error("No active Sovara turn");
-    const step = await this.attemptExport(() =>
-      this.client.prepare(
-        scope,
-        "sovara.trace",
-        "tool",
-        {
-          tool_name: "Sovara lesson retrieval",
-          context,
-          source: "pi-extension",
-        },
-        signal,
-      ),
-    );
-    let result: Retrieval;
+    const started = Date.now();
+    this.retrieval = {
+      applied_lessons: [],
+      rendered_lessons_block: "",
+      retrieval_status: "failed",
+    };
     try {
       signal?.throwIfAborted();
-      result = await this.client.retrieve(scope, context, signal);
-      this.retrievalWarning =
-        result.warning_message ||
-        result.error_message ||
-        (result.retrieval_status === "failed"
-          ? "Lesson retrieval failed."
-          : undefined);
+      const scope = this.scope;
+      if (!scope?.turnId) throw new Error("No active Sovara turn");
+      const result = await this.client.retrieve(scope, context, signal);
+      signal?.throwIfAborted();
       this.retrieval = {
-        status: result.retrieval_status,
-        query: context,
-        result,
+        ...this.retrieval,
+        retrieval_status: result.retrieval_status,
+        model: result.model_used,
+        latency_tier: result.latency_tier,
+        warning_message: result.warning_message,
+        error_message:
+          result.error_message ||
+          (result.retrieval_status === "failed"
+            ? "Lesson retrieval failed."
+            : undefined),
       };
+      return result;
     } catch (error) {
-      this.retrieval = { status: "failed" };
-      if (step) {
-        await this.attemptExport(() =>
-          this.client.finish(
-            step,
-            { status: "failed" },
-            "RetrievalFailed",
-            undefined,
-            signal?.aborted ? AbortSignal.timeout(1000) : signal,
-          ),
-        );
-      }
+      this.retrieval.error_message =
+        error instanceof SovaraError ? error.code : "RetrievalFailed";
       throw error;
+    } finally {
+      this.retrieval.retrieval_latency_ms = Date.now() - started;
+      this.retrievalWarning =
+        this.retrieval.warning_message || this.retrieval.error_message;
     }
-    if (step) {
-      const exported = await this.attemptExport(async () => {
-        await this.client.finish(
-          step,
-          result,
-          result.retrieval_status === "failed" ? "RetrievalFailed" : undefined,
-          undefined,
-          signal,
-        );
-        return true;
-      });
-      // Keep full fallback evidence until the observation export is acknowledged.
-      if (exported)
-        this.retrieval = {
-          status: result.retrieval_status,
-          step_uuid: step.id,
-        };
-    }
-    signal?.throwIfAborted();
-    return result;
   }
 
   async beginGeneration(
@@ -222,13 +199,13 @@ export class Recorder {
           previous,
           { status: "superseded" },
           "ProviderRetry",
-          undefined,
           signal,
         ),
       );
       signal?.throwIfAborted();
     }
     this.firstTokenAt = undefined;
+    const lessonMetadata = structuredClone(this.retrieval);
     this.generation = await this.client.prepare(
       this.scope,
       "pi.llm",
@@ -238,12 +215,12 @@ export class Recorder {
         provider: model?.provider,
         provider_payload: payload,
         capture: "pi-provider-hook",
-        lesson_retrieval: this.retrieval ?? null,
         pi_session_id: this.sessionId,
         parent_session: this.parentSession,
       },
       signal,
     );
+    this.generation.lessonMetadata = lessonMetadata;
   }
   async endGeneration(
     message: AssistantMessage,
@@ -268,7 +245,6 @@ export class Recorder {
             : this.firstTokenAt - step.started,
       }),
       error,
-      undefined,
       signal,
     );
   }
@@ -314,7 +290,6 @@ export class Recorder {
       step,
       result,
       failed ? "ToolError" : undefined,
-      undefined,
       signal,
     );
   }
@@ -351,7 +326,6 @@ export class Recorder {
               step,
               { status: "interrupted" },
               reason ?? "Interrupted",
-              undefined,
               signal,
             ),
           ),

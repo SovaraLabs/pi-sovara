@@ -34,7 +34,20 @@ test(
         authHeaders: {},
         autoStartLocal: false,
       };
-      const client = new SovaraClient(config);
+      let retrievalResponse: unknown;
+      const client = new SovaraClient(config, async (input, init) => {
+        if (
+          String(input).endsWith("/internal/lessons/retrieve") &&
+          retrievalResponse
+        )
+          return Response.json(retrievalResponse);
+        return fetch(input, init);
+      });
+      const headers = {
+        "x-sovara-component": "pi-extension",
+        "x-sovara-contract": "runner-api",
+        "x-sovara-contract-version": "4",
+      };
       let connected = false;
       for (let i = 0; i < 100; i++) {
         try {
@@ -55,9 +68,7 @@ test(
       );
       await recorder.start("First turn");
       const runId = recorder.scope!.recording.run_id;
-      const lessons = await recorder.retrieve("Synthetic task with no lessons");
-      assert.equal(lessons.lessons.length, 0);
-      recorder.setContext([
+      await recorder.prepareContext([
         { role: "user", content: "First turn", timestamp: 1 },
       ]);
       await recorder.beginGeneration(
@@ -93,6 +104,40 @@ test(
       await recorder.close();
       await recorder.start("Resumed turn");
       assert.equal(recorder.scope!.recording.run_id, runId);
+      const seed = await fetch(
+        `${execUrl}/health/test-lessons/${recorder.scope!.recording.project_id}`,
+        { method: "POST", headers },
+      );
+      assert.equal(seed.status, 200);
+      const seeded = await seed.json();
+      retrievalResponse = {
+        lessons: seeded,
+        rendered_lessons_block: "",
+        retrieval_status: "complete",
+        model_used: "synthetic-helper",
+        latency_tier: "HIGH",
+      };
+      const injected = await recorder.prepareContext([
+        { role: "user", content: "Add Micron?", timestamp: 2 },
+      ]);
+      await recorder.beginGeneration(
+        { messages: injected, attempt: 1 },
+        { id: "gpt-test", provider: "openai" },
+      );
+      await recorder.beginGeneration(
+        { messages: injected, attempt: 2 },
+        { id: "gpt-test", provider: "openai" },
+      );
+      await recorder.endGeneration({
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Check the sector limit and investment horizon.",
+          },
+        ],
+        stopReason: "stop",
+      } as Parameters<Recorder["endGeneration"]>[0]);
       await recorder.close();
       let tree: any;
       for (let i = 0; i < 100; i++) {
@@ -105,16 +150,21 @@ test(
         });
         tree = await response.json();
         if (
-          tree.steps?.length === 3 &&
-          tree.steps.every((s: any) => s.status === "success") &&
+          tree.steps?.length === 4 &&
+          tree.lesson_details?.length === 3 &&
           tree.turns?.length === 2
         )
           break;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       assert.equal(tree.turns.length, 2);
-      assert.equal(tree.steps.length, 3);
-      assert.ok(tree.steps.every((step: any) => step.status === "success"));
+      assert.equal(tree.steps.length, 4);
+      assert.equal(
+        tree.steps.filter((step: any) => step.api_type === "sovara.trace")
+          .length,
+        1,
+      );
+      assert.equal(tree.lesson_details.length, 3);
       const llm = tree.steps.find((step: any) => step.api_type === "pi.llm");
       assert.ok(llm);
       assert.equal(
@@ -126,23 +176,52 @@ test(
       assert.equal(input.to_show.body.messages[0].content, "First turn");
       assert.equal(input.to_show.provider_payload, undefined);
       assert.equal(input.to_show.lesson_retrieval, undefined);
-      const retrieval = tree.steps.find(
-        (step: any) =>
-          JSON.parse(step.input_json).raw.tool_name ===
-          "Sovara lesson retrieval",
+      const empty = tree.lesson_details.find(
+        (record: any) => record.step_uuid === llm.step_uuid,
       );
-      assert.ok(retrieval);
-      const retrievalOutput = JSON.parse(retrieval.output_json);
+      assert.deepEqual(empty.applied_lessons, []);
+      assert.ok(empty.warning_message);
+      assert.equal(empty.retrieval_status, "complete");
+      const applied = tree.lesson_badges.filter(
+        (record: any) => record.step_uuid !== llm.step_uuid,
+      );
+      assert.equal(applied.length, 2);
+      for (const record of applied) {
+        assert.equal(record.applied_lessons.length, 2);
+        assert.deepEqual(
+          record.applied_lessons.map((lesson: any) => [
+            lesson.title,
+            lesson.summary,
+          ]),
+          seeded.map((lesson: any) => [lesson.title, lesson.summary]),
+        );
+        assert.equal(
+          tree.steps.find((step: any) => step.step_uuid === record.step_uuid)
+            .api_type,
+          "pi.llm",
+        );
+        const detail = tree.lesson_details.find(
+          (detail: any) => detail.step_uuid === record.step_uuid,
+        );
+        assert.equal(
+          detail.rendered_lessons_block,
+          (injected.at(-1) as any).content,
+        );
+        assert.equal(detail.model, "synthetic-helper");
+        assert.ok(detail.retrieval_latency_ms >= 0);
+      }
       assert.equal(
-        retrievalOutput.raw.tool_output.retrieval_status,
-        "complete",
+        new Set(tree.lesson_details.map((r: any) => r.retrieval_id)).size,
+        3,
       );
-      assert.equal(retrieval.display_output.retrieval_status, "complete");
-      assert.ok(retrieval.display_output.warning_message);
       const tool = tree.steps.find((step: any) => step.name === "Read");
       assert.match(JSON.stringify(tool.display_output), /example contents/);
-      assert.equal(input.raw.lesson_retrieval.step_uuid, retrieval.step_uuid);
-      assert.equal(input.raw.lesson_retrieval.result, undefined);
+      assert.ok(
+        !tree.lesson_details.some(
+          (record: any) => record.step_uuid === tool.step_uuid,
+        ),
+      );
+      assert.equal(input.raw.lesson_retrieval, undefined);
       assert.equal(llm.input_tokens, 12);
       assert.equal(llm.output_tokens, 7);
       assert.equal(llm.cache_read_tokens, 2);

@@ -226,6 +226,10 @@ test("successful lessons are injected while trace failure remains visible", asyn
       messages: [{ role: "user", content: "task", timestamp: 1 }],
     });
     assert.match(JSON.stringify(result.messages), /Use a deterministic clock/);
+    await h.emit("before_provider_request", { payload: {} });
+    await h.emit("message_end", {
+      message: { role: "assistant", content: "answer", stopReason: "stop" },
+    });
     h.backend.reject("");
     await h.emit("agent_settled");
     assert.equal(h.statuses.at(-1), "sovara: export incomplete");
@@ -317,14 +321,14 @@ test("skipped lesson retrieval preserves its warning in traces and Pi without re
       assert.deepEqual(result.messages, messages);
     }
     assert.deepEqual(h.notifications, [`Sovara: ${warning}`]);
+    await h.emit("before_provider_request", { payload: {} });
+    await h.emit("agent_settled");
     const retrieval = h.backend.calls.find((c) =>
       c.path.endsWith("/finalize"),
     )!;
-    assert.equal(
-      JSON.parse(retrieval.body.output_json).raw.tool_output.warning_message,
-      warning,
-    );
-    await h.emit("agent_settled");
+    assert.equal(retrieval.body.lesson_metadata.warning_message, warning);
+    assert.deepEqual(retrieval.body.lesson_metadata.applied_lessons, []);
+    assert.equal(retrieval.body.api_type, "pi.llm");
     assert.match(h.statuses.at(-1)!, /lesson retrieval warning/);
     await h.command("sovara");
     assert.match(h.notifications.at(-1)!, /Lessons: .*Fast Helper Model/);
@@ -362,10 +366,16 @@ test("a failed retrieval response is recorded as failure while Pi continues", as
       messages,
     );
     assert.deepEqual(h.notifications, ["Sovara: retrieval_unavailable"]);
+    await h.emit("before_provider_request", { payload: {} });
+    await h.emit("message_end", {
+      message: { role: "assistant", content: "answer", stopReason: "stop" },
+    });
     const retrieval = h.backend.calls.find((c) =>
       c.path.endsWith("/finalize"),
     )!;
-    assert.equal(retrieval.body.status, "error");
+    assert.equal(retrieval.body.status, "success");
+    assert.equal(retrieval.body.lesson_metadata.retrieval_status, "failed");
+    assert.deepEqual(retrieval.body.lesson_metadata.applied_lessons, []);
     await h.emit("agent_settled");
     assert.match(h.statuses.at(-1)!, /lesson retrieval warning/);
   } finally {

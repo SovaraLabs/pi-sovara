@@ -37,8 +37,9 @@ npm ci
 
 Inside Pi, use `/login` to connect your model provider, choose a model with `/model`, and run
 `/sovara` to check the selected project. Try: “Read README.md and explain how this project works.”
-After the turn settles, check the Sovara trace for the model, retrieval and tool observations.
-An empty lesson collection is valid: there will be a retrieval observation but no lesson injection.
+After the turn settles, check the Sovara trace for model and tool observations. Applied lessons
+appear on the LLM step as the usual badge and expandable lesson section. An empty lesson
+collection is valid: the LLM has no applied-lesson badge.
 
 To work in another project, launch from that directory using absolute paths to this checkout's
 `node_modules/.bin/pi` and `src/index.ts`. The working directory selects the default Sovara project.
@@ -111,8 +112,7 @@ The retrieval request is allowed up to 15 seconds; failures leave the agent runn
 lessons and are surfaced in the status. Trace export failures do not discard successfully retrieved
 lessons. Caller cancellation interrupts recording and retrieval requests when Pi exposes an active run signal.
 Pi does not expose that signal during `before_agent_start`, so startup registration remains bounded
-by request timeouts. Closing an already prepared retrieval observation after cancellation has a separate
-one-second deadline. Turn cleanup shares one deadline across its writes: ten seconds normally,
+by request timeouts. Turn cleanup shares one deadline across its writes: ten seconds normally,
 shortened to at most one more second when cancellation is observed. Credential fields are
 masked before suffix serialization. Sovara retrieval can consume configured model quota.
 
@@ -124,8 +124,7 @@ The recording follows the Pi session:
 Sovara project
 └── Pi session (durable trace, external key pi:<session-id>)
     ├── User turn
-    │   ├── Automatic lesson retrieval
-    │   ├── LLM call
+    │   ├── LLM call (with applied lessons)
     │   ├── Tool execution / MCP call
     │   └── LLM call
     └── Next user turn
@@ -135,9 +134,11 @@ The adapter negotiates runner-api 4 before sending business requests. Each turn 
 under the same durable session key and closes it when Pi settles. LLM steps include normalized Pi
 context, the payload observed at the provider hook, output, exposed reasoning, usage/cache counts,
 reported cost, first-token timing, and retrieval metadata. The display projection retains normalized
-messages without duplicating provider payloads. Model observations reference acknowledged retrieval
-steps; if retrieval export fails, they retain the query and result as fallback evidence. Exact injected
-text is retained in the captured context, alongside selected IDs and truncation flags. Tool IDs
+messages without duplicating provider payloads. Each LLM attempt owns its standard Sovara lesson
+metadata: only the lessons actually injected, the exact injected text, retrieval timing/model/status,
+and any warnings or errors. Retries and interrupted calls retain their own snapshots. Retrieval
+creates no separate tool step. Existing Sovara lesson records and associations power the normal
+badge and expanded lesson list; no schema changes are required. Tool IDs
 correlate parallel start/end events. Nested tool IDs retain parent metadata. Retry attempts and interrupted operations are
 closed explicitly. Failed finalization does not prevent recording a new attempt or exporting the
 last observed answer. Independent cleanup errors remain visible. Known Sovara credential values and
@@ -160,9 +161,9 @@ Images remain in captured context/payloads; there is no separate media-upload in
 
 Writes have timeouts. The footer says “turn export acknowledged” only after successful API calls;
 it does not claim durable persistence or exactly-once delivery. Failures show “export incomplete”.
-Lesson retrieval is recorded as an automatic tool step so its query and result can be inspected;
-it is not a tool selected by the model. Retrieval warnings appear in Pi and under `/sovara`,
-and are retained in that step's output. A successful export does not mean lessons were injected.
+Retrieval warnings appear in Pi and under `/sovara`, and are retained in the LLM step's lesson
+metadata. Failed or skipped retrieval adds no applied lessons, even when the model succeeds.
+A successful export does not mean lessons were injected.
 For example, if Sovara reports an unverified Fast Helper Model, configure and verify that model
 in Sovara before trying the prompt again. Pi's own model login does not configure Sovara's helper.
 Headless sessions get a metadata-only stderr warning. There is no offline spool/backfill. A hard
@@ -182,7 +183,8 @@ Tests include Pi's actual extension loader and agent loop with a synthetic provi
 suffix extraction, direct API retrieval, lesson injection, and tracing without paid model calls.
 
 An optional test runs the real Sovara exec server against a temporary database and verifies persisted
-turns, steps, token usage, project creation and session continuation:
+turns, steps, token usage, project creation, session continuation, and the lesson badge/detail
+payloads used by the Sovara UI:
 
 ```sh
 SOVARA_SOURCE_DIR=/path/to/sovara npm run test:backend
