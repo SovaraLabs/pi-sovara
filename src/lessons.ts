@@ -24,6 +24,11 @@ export class RetrievalSuffix {
   private previous: string[] = [];
   private last?: { context: string; truncated: boolean };
 
+  constructor(
+    private readonly sanitize: (value: unknown) => unknown = (value) =>
+      redact(value, []),
+  ) {}
+
   context(messages: AgentMessage[]): { context: string; truncated: boolean } {
     const conversation = cleanMessages(messages).filter(
       (m) => m.role !== "system",
@@ -57,26 +62,23 @@ export class RetrievalSuffix {
               return part;
             });
       return JSON.stringify(
-        redact(
-          {
-            role: message.role,
-            content,
-            ...(message.role === "toolResult"
-              ? {
-                  toolName: message.toolName,
-                  toolCallId: message.toolCallId,
-                  isError: message.isError,
-                }
-              : {}),
-            ...(message.role === "custom"
-              ? { customType: message.customType }
-              : {}),
-            ...(message.role === "bashExecution"
-              ? { command: message.command }
-              : {}),
-          },
-          [],
-        ),
+        this.sanitize({
+          role: message.role,
+          content,
+          ...(message.role === "toolResult"
+            ? {
+                toolName: message.toolName,
+                toolCallId: message.toolCallId,
+                isError: message.isError,
+              }
+            : {}),
+          ...(message.role === "custom"
+            ? { customType: message.customType }
+            : {}),
+          ...(message.role === "bashExecution"
+            ? { command: message.command }
+            : {}),
+        }),
       );
     });
     let common = 0;

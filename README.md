@@ -25,6 +25,25 @@ pi install "$PWD"
 After publication, the npm installation command will be `pi install npm:@sovara/pi`.
 Pi loads the TypeScript entry point directly; no build step is needed.
 
+## Try it from a checkout
+
+With Node.js 22.19+ and a running compatible Sovara server, install this checkout's dependencies
+and launch the bundled Pi 1.2.0 with the extension explicitly loaded:
+
+```sh
+npm ci
+./node_modules/.bin/pi -e ./src/index.ts
+```
+
+Inside Pi, use `/login` to connect your model provider, choose a model with `/model`, and run
+`/sovara` to check the selected project. Try: “Read README.md and explain how this project works.”
+After the turn settles, check the Sovara trace for the model, retrieval and tool observations.
+An empty lesson collection is valid: there will be a retrieval observation but no lesson injection.
+
+To work in another project, launch from that directory using absolute paths to this checkout's
+`node_modules/.bin/pi` and `src/index.ts`. The working directory selects the default Sovara project.
+This explicit `-e` invocation loads the extension for that launch; it does not register a package.
+
 ## Connect and select a project
 
 The extension uses the saved Sovara Desktop/CLI connection in `~/.sovara/app_connection.json`.
@@ -82,8 +101,11 @@ HTTP client. No MCP connection is required.
 
 The retrieval request is allowed up to 15 seconds; failures leave the agent running without added
 lessons and are surfaced in the status. Trace export failures do not discard successfully retrieved
-lessons. Cancellation interrupts preparation, retrieval, and finalization; closing an already
-prepared observation after cancellation has a separate one-second deadline. Credential fields are
+lessons. Caller cancellation interrupts recording and retrieval requests when Pi exposes an active run signal.
+Pi does not expose that signal during `before_agent_start`, so startup registration remains bounded
+by request timeouts. Closing an already prepared retrieval observation after cancellation has a separate
+one-second deadline. Turn cleanup shares one deadline across its writes: ten seconds normally,
+shortened to at most one more second when cancellation is observed. Credential fields are
 masked before suffix serialization. Sovara retrieval can consume configured model quota.
 
 ## Tracing
@@ -104,9 +126,14 @@ Sovara project
 The adapter negotiates runner-api 4 before sending business requests. Each turn opens a recording
 under the same durable session key and closes it when Pi settles. LLM steps include normalized Pi
 context, the payload observed at the provider hook, output, exposed reasoning, usage/cache counts,
-reported cost, first-token timing, and retrieval metadata. Tool IDs correlate parallel start/end
-events. Nested tool IDs retain parent metadata. Retry attempts and interrupted operations are
-closed explicitly. Known Sovara credential values and conventional credential fields are masked.
+reported cost, first-token timing, and retrieval metadata. The display projection retains normalized
+messages without duplicating provider payloads. Model observations reference acknowledged retrieval
+steps; if retrieval export fails, they retain the query and result as fallback evidence. Exact injected
+text is retained in the captured context, alongside selected IDs and truncation flags. Tool IDs
+correlate parallel start/end events. Nested tool IDs retain parent metadata. Retry attempts and interrupted operations are
+closed explicitly. Failed finalization does not prevent recording a new attempt or exporting the
+last observed answer. Independent cleanup errors remain visible. Known Sovara credential values and
+conventional credential fields are masked before structured values are encoded, including run input/output.
 
 Child Pi processes inherit the parent project. Those that load the extension and inherit its `SOVARA_PI_PARENT` environment attach
 as Sovara subruns beneath the active parent turn. This environment contains short-lived recording

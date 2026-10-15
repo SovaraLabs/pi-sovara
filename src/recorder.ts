@@ -1,6 +1,23 @@
 import type { SovaraClient, Scope, Step, Retrieval } from "./client.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Config } from "./config.ts";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import {
+  cleanMessages,
+  lessonBlock,
+  referenceMessage,
+  RetrievalSuffix,
+} from "./lessons.ts";
+
+interface RetrievalObservation {
+  status: string;
+  query?: string;
+  result?: Retrieval;
+  step_uuid?: string;
+  injected_lesson_ids?: string[];
+  query_truncated?: boolean;
+  injection_truncated?: boolean;
+}
 
 /** Pi reports uncached input separately, matching Sovara's normalized token columns. */
 export function withUsage(value: unknown): unknown {
@@ -29,13 +46,15 @@ export function withUsage(value: unknown): unknown {
 
 export class Recorder {
   scope?: Scope;
-  generation?: Step;
-  readonly tools = new Map<string, Step>();
-  context: unknown[] = [];
-  retrieval?: Record<string, unknown>;
-  retrievalExportError?: unknown;
-  firstTokenAt?: number;
-  finalOutput: unknown = "";
+  private generation?: Step;
+  private readonly tools = new Map<string, Step>();
+  private context: AgentMessage[] = [];
+  private retrieval?: RetrievalObservation;
+  private readonly suffix: RetrievalSuffix;
+  private readonly exportErrors: unknown[] = [];
+  private firstTokenAt?: number;
+  private finalOutput: unknown = "";
+  private turnSignal?: AbortSignal;
 
   constructor(
     readonly client: SovaraClient,
@@ -44,30 +63,84 @@ export class Recorder {
     readonly cwd: string,
     readonly parent?: Scope,
     readonly parentSession?: string,
-  ) {}
+  ) {
+    this.suffix = new RetrievalSuffix((value) => client.sanitize(value));
+  }
 
-  async start(input: string): Promise<void> {
+  setContext(messages: AgentMessage[]): void {
+    this.context = structuredClone(messages);
+  }
+
+  noteFirstToken(): void {
+    if (this.generation && this.firstTokenAt === undefined)
+      this.firstTokenAt = Date.now();
+  }
+
+  async prepareContext(
+    messages: AgentMessage[],
+    signal?: AbortSignal,
+  ): Promise<AgentMessage[]> {
+    const clean = cleanMessages(messages);
+    this.setContext(clean);
+    const query = this.suffix.context(clean);
+    const result = await this.retrieve(query.context, signal);
+    const block = lessonBlock(result);
+    this.retrieval = {
+      ...this.retrieval!,
+      injected_lesson_ids: block.ids,
+      query_truncated: query.truncated,
+      injection_truncated: block.truncated,
+    };
+    const prepared = block.text
+      ? [...clean, referenceMessage(block.text)]
+      : clean;
+    // Exact injected text is already in the captured context; keep it in one place.
+    this.setContext(prepared);
+    return prepared;
+  }
+
+  takeExportErrors(): unknown[] {
+    return this.exportErrors.splice(0);
+  }
+
+  private async attemptExport<T>(
+    work: () => Promise<T>,
+  ): Promise<T | undefined> {
+    try {
+      return await work();
+    } catch (error) {
+      this.exportErrors.push(error);
+      return undefined;
+    }
+  }
+
+  async start(input: unknown, signal?: AbortSignal): Promise<void> {
     if (this.scope) await this.close("Superseded");
+    signal?.throwIfAborted();
+    this.turnSignal = signal;
     this.finalOutput = "";
     this.retrieval = undefined;
     this.context = [];
     const recording = this.parent
-      ? await this.client.subrun(this.parent, this.sessionId)
-      : await this.client.register(this.sessionId, this.cwd);
+      ? await this.client.subrun(this.parent, this.sessionId, signal)
+      : await this.client.register(this.sessionId, this.cwd, signal);
     // Retain credentials even if declaring the turn fails, so shutdown can close it.
     this.scope = { recording, turnId: null };
-    this.scope = await this.client.turn(recording, input);
-    await this.client.io(this.scope, "input", input);
+    this.scope = await this.client.turn(recording, input, signal);
+    const scope = this.scope;
+    await this.attemptExport(() =>
+      this.client.io(scope, "input", input, signal),
+    );
+    signal?.throwIfAborted();
   }
 
   async retrieve(context: string, signal?: AbortSignal): Promise<Retrieval> {
-    this.retrievalExportError = undefined;
+    this.turnSignal = signal ?? this.turnSignal;
     signal?.throwIfAborted();
     const scope = this.scope;
     if (!scope?.turnId) throw new Error("No active Sovara turn");
-    let step: Step | undefined;
-    try {
-      step = await this.client.prepare(
+    const step = await this.attemptExport(() =>
+      this.client.prepare(
         scope,
         "sovara.trace",
         "tool",
@@ -77,40 +150,43 @@ export class Recorder {
           source: "pi-extension",
         },
         signal,
-      );
-    } catch (error) {
-      signal?.throwIfAborted();
-      this.retrievalExportError = error;
-    }
+      ),
+    );
     let result: Retrieval;
     try {
       signal?.throwIfAborted();
       result = await this.client.retrieve(scope, context, signal);
-      this.retrieval = { query: context, result };
+      this.retrieval = {
+        status: result.retrieval_status,
+        query: context,
+        result,
+      };
     } catch (error) {
       this.retrieval = { status: "failed" };
       if (step) {
-        try {
-          // Closing an already prepared observation may outlive cancellation, but only for one second.
-          await this.client.finish(
+        await this.attemptExport(() =>
+          this.client.finish(
             step,
             { status: "failed" },
             "RetrievalFailed",
             undefined,
             signal?.aborted ? AbortSignal.timeout(1000) : signal,
-          );
-        } catch (exportError) {
-          this.retrievalExportError = exportError;
-        }
+          ),
+        );
       }
       throw error;
     }
     if (step) {
-      try {
+      const exported = await this.attemptExport(async () => {
         await this.client.finish(step, result, undefined, undefined, signal);
-      } catch (error) {
-        this.retrievalExportError = error;
-      }
+        return true;
+      });
+      // Keep full fallback evidence until the observation export is acknowledged.
+      if (exported)
+        this.retrieval = {
+          status: result.retrieval_status,
+          step_uuid: step.id,
+        };
     }
     signal?.throwIfAborted();
     return result;
@@ -119,36 +195,55 @@ export class Recorder {
   async beginGeneration(
     payload: unknown,
     model: { id: string; provider: string } | undefined,
+    signal?: AbortSignal,
   ): Promise<void> {
+    this.turnSignal = signal ?? this.turnSignal;
+    signal?.throwIfAborted();
     if (!this.scope?.turnId) return;
     if (this.generation) {
       const previous = this.generation;
       this.generation = undefined;
-      await this.client.finish(
-        previous,
-        { status: "superseded" },
-        "ProviderRetry",
+      await this.attemptExport(() =>
+        this.client.finish(
+          previous,
+          { status: "superseded" },
+          "ProviderRetry",
+          undefined,
+          signal,
+        ),
       );
+      signal?.throwIfAborted();
     }
     this.firstTokenAt = undefined;
-    this.generation = await this.client.prepare(this.scope, "pi.llm", "llm", {
-      body: { model: model?.id, messages: this.context },
-      provider: model?.provider,
-      provider_payload: payload,
-      capture: "pi-provider-hook",
-      lesson_retrieval: this.retrieval ?? null,
-      pi_session_id: this.sessionId,
-      parent_session: this.parentSession,
-    });
+    this.generation = await this.client.prepare(
+      this.scope,
+      "pi.llm",
+      "llm",
+      {
+        body: { model: model?.id, messages: this.context },
+        provider: model?.provider,
+        provider_payload: payload,
+        capture: "pi-provider-hook",
+        lesson_retrieval: this.retrieval ?? null,
+        pi_session_id: this.sessionId,
+        parent_session: this.parentSession,
+      },
+      signal,
+    );
   }
-  async endGeneration(message: AssistantMessage): Promise<void> {
+  async endGeneration(
+    message: AssistantMessage,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.finalOutput = structuredClone(message.content);
     if (!this.generation) return;
+    this.turnSignal = signal ?? this.turnSignal;
+    signal?.throwIfAborted();
     const step = this.generation;
     this.generation = undefined;
     const error = ["error", "aborted"].includes(message.stopReason)
       ? message.stopReason
       : undefined;
-    this.finalOutput = message.content;
     await this.client.finish(
       step,
       withUsage({
@@ -159,6 +254,8 @@ export class Recorder {
             : this.firstTokenAt - step.started,
       }),
       error,
+      undefined,
+      signal,
     );
   }
   async beginTool(
@@ -166,7 +263,10 @@ export class Recorder {
     name: string,
     args: unknown,
     parentToolCallId?: string,
+    signal?: AbortSignal,
   ): Promise<void> {
+    this.turnSignal = signal ?? this.turnSignal;
+    signal?.throwIfAborted();
     if (!this.scope?.turnId) return;
     const isMcp = name.startsWith("mcp__");
     const input = {
@@ -181,14 +281,28 @@ export class Recorder {
       isMcp ? "MCP.ClientSession.send_request" : "sovara.trace",
       isMcp ? "mcp" : "tool",
       input,
+      signal,
     );
     this.tools.set(id, step);
   }
-  async endTool(id: string, result: unknown, failed: boolean): Promise<void> {
+  async endTool(
+    id: string,
+    result: unknown,
+    failed: boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.turnSignal = signal ?? this.turnSignal;
+    signal?.throwIfAborted();
     const step = this.tools.get(id);
     if (!step) return;
     this.tools.delete(id);
-    await this.client.finish(step, result, failed ? "ToolError" : undefined);
+    await this.client.finish(
+      step,
+      result,
+      failed ? "ToolError" : undefined,
+      undefined,
+      signal,
+    );
   }
   async close(reason?: string): Promise<void> {
     const scope = this.scope;
@@ -200,21 +314,45 @@ export class Recorder {
     ];
     this.tools.clear();
     this.generation = undefined;
+    // One budget for the whole close, shortened to one second on cancellation.
+    const controller = new AbortController();
+    const deadline = Date.now() + 10000;
+    let timer = setTimeout(() => controller.abort(), 10000);
+    const cancelled = () => {
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => controller.abort(),
+        Math.max(0, Math.min(1000, deadline - Date.now())),
+      );
+    };
+    const parent = this.turnSignal;
+    if (parent?.aborted) cancelled();
+    else parent?.addEventListener("abort", cancelled, { once: true });
+    const signal = controller.signal;
     try {
-      const results = await Promise.allSettled(
+      await Promise.all(
         pending.map((step) =>
-          this.client.finish(
-            step,
-            { status: "interrupted" },
-            reason ?? "Interrupted",
+          this.attemptExport(() =>
+            this.client.finish(
+              step,
+              { status: "interrupted" },
+              reason ?? "Interrupted",
+              undefined,
+              signal,
+            ),
           ),
         ),
       );
-      if (results.some((result) => result.status === "rejected"))
-        throw new Error("Incomplete Sovara export");
-      await this.client.io(scope, "output", this.finalOutput);
+      await this.attemptExport(() =>
+        this.client.io(scope, "output", this.finalOutput, signal),
+      );
+      await this.attemptExport(() =>
+        this.client.close(scope.recording, signal),
+      );
     } finally {
-      await this.client.close(scope.recording);
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", cancelled);
+      this.turnSignal = undefined;
     }
   }
 }

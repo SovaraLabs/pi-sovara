@@ -16,13 +16,11 @@ export interface Lesson {
   lesson_id: string;
   title: string;
   content: string;
-  [key: string]: unknown;
 }
 export interface Retrieval {
   lessons: Lesson[];
   rendered_lessons_block: string;
   retrieval_status: string;
-  [key: string]: unknown;
 }
 export interface Step {
   id: string;
@@ -52,9 +50,6 @@ function field(value: unknown, name: string): string {
     throw new SovaraError("invalid_response");
   return data[name];
 }
-export function wrapped(raw: unknown): string {
-  return JSON.stringify({ raw, to_show: raw });
-}
 
 /** Narrow runner-api 4 adapter. No SDK monkey patches or provider credentials. */
 export class SovaraClient {
@@ -67,6 +62,35 @@ export class SovaraClient {
 
   protect(secret: string): void {
     if (secret) this.secrets.add(secret);
+  }
+
+  /** Sanitize structures before nested JSON encoding, including escaped secret values. */
+  sanitize(value: unknown, recording?: Recording): unknown {
+    return redact(value, [
+      ...this.secrets,
+      ...Object.values(this.config.authHeaders),
+      recording?.run_write_token ?? "",
+    ]);
+  }
+
+  private text(value: unknown, recording?: Recording): string {
+    const safe = this.sanitize(value, recording);
+    return typeof safe === "string" ? safe : JSON.stringify(safe);
+  }
+
+  private wrapped(value: unknown, recording: Recording, api?: string): string {
+    const raw = this.sanitize(value, recording);
+    // Display/analysis retains normalized messages; provider and retrieval evidence live in raw.
+    const to_show =
+      api === "pi.llm"
+        ? Object.fromEntries(
+            Object.entries(object(raw)).filter(
+              ([key]) =>
+                key !== "provider_payload" && key !== "lesson_retrieval",
+            ),
+          )
+        : raw;
+    return JSON.stringify({ raw, to_show });
   }
 
   async connect(): Promise<void> {
@@ -122,28 +146,31 @@ export class SovaraClient {
           ? { "x-sovara-run-token": recording.run_write_token }
           : this.config.authHeaders),
       },
-      body: JSON.stringify(
-        redact(body, [
-          ...this.secrets,
-          ...Object.values(this.config.authHeaders),
-          recording?.run_write_token ?? "",
-        ]),
-      ),
+      body: JSON.stringify(this.sanitize(body, recording)),
     });
     // Never interpolate remote error bodies: they can contain prompts or secrets.
     if (!response.ok) throw new SovaraError("request_failed", response.status);
     return response.json();
   }
 
-  async register(sessionId: string, cwd: string): Promise<Recording> {
+  async register(
+    sessionId: string,
+    cwd: string,
+    signal?: AbortSignal,
+  ): Promise<Recording> {
     return this.recording(
-      await this.request("/runner/register", {
-        name: "Pi session",
-        run_id: `pi:${sessionId}`,
-        project_name: this.config.projectName,
-        project_root: cwd,
-        code_version: null,
-      }),
+      await this.request(
+        "/runner/register",
+        {
+          name: "Pi session",
+          run_id: `pi:${sessionId}`,
+          project_name: this.config.projectName,
+          project_root: cwd,
+          code_version: null,
+        },
+        undefined,
+        signal,
+      ),
     );
   }
   private recording(data: unknown): Recording {
@@ -155,7 +182,11 @@ export class SovaraClient {
       project_id: field(data, "project_id"),
     };
   }
-  async subrun(parent: Scope, sessionId: string): Promise<Recording> {
+  async subrun(
+    parent: Scope,
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<Recording> {
     const data = await this.request(
       "/runner/subrun",
       {
@@ -165,17 +196,23 @@ export class SovaraClient {
         lesson_scope_paths: null,
       },
       parent.recording,
+      signal,
     );
     return this.recording({
       ...object(data),
       project_id: parent.recording.project_id,
     });
   }
-  async turn(recording: Recording, input: string): Promise<Scope> {
+  async turn(
+    recording: Recording,
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<Scope> {
     const data = await this.request(
       "/runner/turns",
-      { run_id: recording.run_id, turn_input: input },
+      { run_id: recording.run_id, turn_input: this.text(input, recording) },
       recording,
+      signal,
     );
     if (
       field(data, "run_id") !== recording.run_id ||
@@ -184,17 +221,19 @@ export class SovaraClient {
       throw new SovaraError("invalid_turn_identity");
     return { recording, turnId: field(data, "turn_id") };
   }
-  async close(recording: Recording): Promise<void> {
+  async close(recording: Recording, signal?: AbortSignal): Promise<void> {
     await this.request(
       "/runner/deregister",
       { run_id: recording.run_id },
       recording,
+      signal,
     );
   }
   async io(
     scope: Scope,
     kind: "input" | "output",
     value: unknown,
+    signal?: AbortSignal,
   ): Promise<void> {
     await this.request(
       "/runner/run-io",
@@ -202,9 +241,10 @@ export class SovaraClient {
         run_id: scope.recording.run_id,
         turn_id: scope.turnId,
         kind,
-        value: typeof value === "string" ? value : JSON.stringify(value),
+        value: this.text(value, scope.recording),
       },
       scope.recording,
+      signal,
     );
   }
   async retrieve(
@@ -241,14 +281,12 @@ export class SovaraClient {
       )
         throw new SovaraError("invalid_retrieval");
       return {
-        ...lesson,
         lesson_id: field(lesson, "lesson_id"),
         title: lesson.title,
         content: lesson.content,
       };
     });
     return {
-      ...payload,
       lessons,
       rendered_lessons_block: payload.rendered_lessons_block,
       retrieval_status: payload.retrieval_status,
@@ -272,7 +310,7 @@ export class SovaraClient {
         step_uuid: id,
         api_type: api,
         step_kind: kind,
-        input_json: wrapped(redact(input, [])),
+        input_json: this.wrapped(input, scope.recording, api),
         prepare_runtime_lessons: false,
         prompt_bearing_suffix_json: "[]",
       },
@@ -298,8 +336,8 @@ export class SovaraClient {
         step_uuid: step.id,
         api_type: step.api,
         step_kind: step.kind,
-        input_json: wrapped(redact(step.input, [])),
-        output_json: wrapped(redact(output, [])),
+        input_json: this.wrapped(step.input, step.scope.recording, step.api),
+        output_json: this.wrapped(output, step.scope.recording),
         status: errorType ? "error" : "success",
         error_json: errorType
           ? JSON.stringify({ type: errorType, message: errorType })

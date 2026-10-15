@@ -19,8 +19,8 @@ for (const failedPath of [
       server.reject(failedPath);
       const result = await recorder.retrieve("task");
       assert.equal(result.lessons.length, 1);
-      assert.ok(recorder.retrievalExportError);
-      assert.equal(recorder.retrieval?.status, undefined);
+      assert.equal(recorder.takeExportErrors().length, 1);
+
       assert.equal(
         server.calls.filter((c) => c.path.endsWith("/finalize")).length,
         failedPath.endsWith("/finalize") ? 1 : 0,
@@ -204,7 +204,11 @@ test("retrieval rejects malformed responses at the boundary", async () => {
   ]) {
     await assert.rejects(client.retrieve(scope, "query"), /invalid_/);
   }
-  payload = valid;
+  payload = {
+    ...valid,
+    debug_blob: "unneeded",
+    lessons: [{ ...valid.lessons[0], debug_blob: "unneeded" }],
+  };
   assert.deepEqual(await client.retrieve(scope, "query"), valid);
 });
 
@@ -250,7 +254,7 @@ test(
       });
       assert.equal(cleanupSignal?.aborted, true);
       assert.equal(
-        (recorder.retrievalExportError as Error).name,
+        (recorder.takeExportErrors()[0] as Error).name,
         "TimeoutError",
       );
     } finally {
@@ -259,3 +263,65 @@ test(
     }
   },
 );
+
+for (const failedPath of [
+  "/internal/runner/llm/prepare",
+  "/internal/runner/llm/finalize",
+]) {
+  test(`model evidence remains self-contained after retrieval export fails at ${failedPath}`, async () => {
+    const server = await fixtureServer();
+    const client = new SovaraClient(server.config);
+    const recorder = new Recorder(client, server.config, "fallback", "/repo");
+    try {
+      await client.connect();
+      await recorder.start("task");
+      server.reject(failedPath);
+      const messages = await recorder.prepareContext([
+        { role: "user", content: "fallback task", timestamp: 1 },
+      ]);
+      server.reject("");
+      await recorder.beginGeneration({ messages }, undefined);
+      const model = server.calls
+        .filter(
+          (call) =>
+            call.path.endsWith("/prepare") && call.body.api_type === "pi.llm",
+        )
+        .at(-1)!;
+      const evidence = JSON.parse(model.body.input_json).raw.lesson_retrieval;
+      assert.match(evidence.query, /fallback task/);
+      assert.equal(evidence.result.lessons[0].lesson_id, "lesson-1");
+      assert.equal(evidence.step_uuid, undefined);
+      assert.match(JSON.stringify(messages), /Use a deterministic clock/);
+      await recorder.close();
+    } finally {
+      await server.close();
+    }
+  });
+}
+
+test("suffix sanitizes escaped integration secrets before query serialization", async () => {
+  const server = await fixtureServer();
+  const client = new SovaraClient(server.config);
+  const recorder = new Recorder(
+    client,
+    server.config,
+    "suffix-secret",
+    "/repo",
+  );
+  const secret = 'secret"with\na-newline';
+  client.protect(secret);
+  try {
+    await client.connect();
+    await recorder.start("task");
+    await recorder.prepareContext([
+      { role: "user", content: secret, timestamp: 1 },
+    ]);
+    const query = server.calls.find((call) => call.path.endsWith("/retrieve"))!
+      .body.raw_context;
+    const message = JSON.parse(JSON.parse(query).suffix[0].text);
+    assert.equal(message.content, "[REDACTED]");
+    await recorder.close();
+  } finally {
+    await server.close();
+  }
+});

@@ -6,6 +6,8 @@ export async function fixtureServer() {
   const calls: { path: string; body: any; headers: Record<string, unknown> }[] =
     [];
   let rejectPath = "";
+  let blockedPath = "";
+  let reached: (() => void) | undefined;
   let versions: unknown = [4];
   const server = createServer(async (req, res) => {
     let raw = "";
@@ -13,6 +15,11 @@ export async function fixtureServer() {
     const body = raw ? JSON.parse(raw) : {};
     calls.push({ path: req.url!, body, headers: req.headers });
     res.setHeader("content-type", "application/json");
+    if (req.url === blockedPath) {
+      blockedPath = "";
+      reached?.();
+      return;
+    }
     if (req.url === rejectPath) {
       res
         .writeHead(503)
@@ -83,6 +90,12 @@ export async function fixtureServer() {
     config,
     reject(path: string) {
       rejectPath = path;
+    },
+    blockNext(path: string): Promise<void> {
+      blockedPath = path;
+      return new Promise((resolve) => {
+        reached = resolve;
+      });
     },
     versions(value: unknown) {
       versions = value;

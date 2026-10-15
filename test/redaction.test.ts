@@ -48,3 +48,39 @@ test("captured bodies redact inherited and recording credentials; auth remains u
     await backend.close();
   }
 });
+
+test("structured run I/O and step payloads redact before JSON encoding", async () => {
+  const backend = await fixtureServer();
+  try {
+    const secret = 'quoted"secret\nwith-newline';
+    const client = new SovaraClient(backend.config);
+    client.protect(secret);
+    await client.connect();
+    const recording = await client.register("session", "/repo");
+    const content = [
+      {
+        type: "toolCall",
+        arguments: { api_key: "service-secret" },
+        text: secret,
+      },
+    ];
+    const scope = await client.turn(recording, content);
+    await client.io(scope, "input", content);
+    await client.io(scope, "output", content);
+    const step = await client.prepare(scope, "sovara.trace", "tool", content);
+    await client.finish(step, content);
+    for (const call of backend.calls.filter((call) =>
+      /turns|run-io|prepare|finalize/.test(call.path),
+    )) {
+      for (const key of ["turn_input", "value", "input_json", "output_json"]) {
+        if (!(key in call.body)) continue;
+        const decoded = JSON.parse(call.body[key]);
+        const parts = Array.isArray(decoded) ? decoded : decoded.raw;
+        assert.equal(parts[0].arguments.api_key, "[REDACTED]");
+        assert.equal(parts[0].text, "[REDACTED]");
+      }
+    }
+  } finally {
+    await backend.close();
+  }
+});

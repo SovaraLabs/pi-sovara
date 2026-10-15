@@ -41,7 +41,7 @@ async function harness(parent?: string) {
     cwd,
     hasUI: true,
     isProjectTrusted: () => true,
-    signal: undefined,
+    signal: undefined as AbortSignal | undefined,
     model: { id: "test", provider: "test" },
     ui: {
       setStatus: (_key: string, value: string) => statuses.push(value),
@@ -221,6 +221,71 @@ test("successful lessons are injected while trace failure remains visible", asyn
     h.backend.reject("");
     await h.emit("agent_settled");
     assert.equal(h.statuses.at(-1), "sovara: export incomplete");
+  } finally {
+    await h.close();
+  }
+});
+
+for (const event of ["before_provider_request", "tool_execution_start"]) {
+  test(`Pi cancellation interrupts ${event}`, { timeout: 3000 }, async () => {
+    const h = await harness();
+    try {
+      const controller = new AbortController();
+      h.ctx.signal = controller.signal;
+      await h.start();
+      await h.prompt();
+      const reached = h.backend.blockNext("/internal/runner/llm/prepare");
+      const running = h.emit(event, {
+        payload: {},
+        toolCallId: "a",
+        toolName: "read",
+        args: {},
+      });
+      await reached;
+      controller.abort();
+      await running;
+      const before = h.backend.calls.length;
+      await h.emit(event, {
+        payload: {},
+        toolCallId: "b",
+        toolName: "read",
+        args: {},
+      });
+      assert.equal(
+        h.backend.calls.length,
+        before,
+        "already cancelled hooks must send no requests",
+      );
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+test("failed standalone summary closes its turn and resets capture before normal retrieval", async () => {
+  const h = await harness();
+  try {
+    await h.start();
+    await h.emit("session_before_compact", { signal: AbortSignal.abort() });
+    await h.emit("before_provider_request", {
+      payload: { messages: ["summary input"] },
+    });
+    await h.emit("session_compact_failed", { aborted: true });
+    const summary = h.backend.calls.find((call) =>
+      call.path.endsWith("/finalize"),
+    )!;
+    assert.equal(summary.body.api_type, "pi.summary");
+    assert.equal(summary.body.status, "error");
+    assert.equal(h.backend.calls.at(-1)!.path, "/runner/deregister");
+    await h.prompt();
+    const result = await h.emit("context_with_system", {
+      messages: [{ role: "user", content: "task", timestamp: 1 }],
+    });
+    assert.match(JSON.stringify(result.messages), /Use a deterministic clock/);
+    assert.equal(
+      h.backend.calls.filter((call) => call.path.endsWith("/retrieve")).length,
+      1,
+    );
   } finally {
     await h.close();
   }

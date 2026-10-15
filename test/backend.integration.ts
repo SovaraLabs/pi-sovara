@@ -56,6 +56,9 @@ test(
       const runId = recorder.scope!.recording.run_id;
       const lessons = await recorder.retrieve("Synthetic task with no lessons");
       assert.equal(lessons.lessons.length, 0);
+      recorder.setContext([
+        { role: "user", content: "First turn", timestamp: 1 },
+      ]);
       await recorder.beginGeneration(
         {
           model: "gpt-test",
@@ -118,6 +121,18 @@ test(
         "Synthetic answer",
       );
       assert.equal(JSON.parse(llm.input_json).raw.body.model, "gpt-test");
+      const input = JSON.parse(llm.input_json);
+      assert.equal(input.to_show.body.messages[0].content, "First turn");
+      assert.equal(input.to_show.provider_payload, undefined);
+      assert.equal(input.to_show.lesson_retrieval, undefined);
+      const retrieval = tree.steps.find(
+        (step: any) =>
+          JSON.parse(step.input_json).raw.tool_name ===
+          "Sovara lesson retrieval",
+      );
+      assert.ok(retrieval);
+      assert.equal(input.raw.lesson_retrieval.step_uuid, retrieval.step_uuid);
+      assert.equal(input.raw.lesson_retrieval.result, undefined);
       assert.equal(llm.input_tokens, 12);
       assert.equal(llm.output_tokens, 7);
       assert.equal(llm.cache_read_tokens, 2);

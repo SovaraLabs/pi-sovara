@@ -5,12 +5,7 @@ import type {
 import { loadConfig } from "./config.ts";
 import { SovaraClient, SovaraError, type Scope } from "./client.ts";
 import { Recorder, withUsage } from "./recorder.ts";
-import {
-  cleanMessages,
-  lessonBlock,
-  referenceMessage,
-  RetrievalSuffix,
-} from "./lessons.ts";
+import { cleanMessages } from "./lessons.ts";
 
 const PARENT_ENV = "SOVARA_PI_PARENT";
 const CONFIG_ENTRY = "sovara-config-v1";
@@ -37,11 +32,10 @@ function inheritedParent(): Parent | undefined {
 
 export default function sovara(pi: ExtensionAPI): void {
   let recorder: Recorder | undefined;
-  let retrievalSuffix = new RetrievalSuffix();
-  let exportFailed = false;
-  let summaryPending = false;
-  let summaryStartedAt: number | undefined;
-  let summaryPayload: unknown;
+  let operationFailed = false;
+  let summaryCapture:
+    | { started: number; payload?: unknown; signal?: AbortSignal }
+    | undefined;
   const originalParent = process.env[PARENT_ENV];
   const restoreParent = () => {
     if (originalParent === undefined) delete process.env[PARENT_ENV];
@@ -51,28 +45,33 @@ export default function sovara(pi: ExtensionAPI): void {
     if (ctx.hasUI) ctx.ui.setStatus("sovara", `sovara: ${text}`);
   };
   const report = (ctx: ExtensionContext, error: unknown) => {
-    if (!ctx.hasUI && !exportFailed)
+    if (!ctx.hasUI && !operationFailed)
       console.error(
         `[sovara-pi] ${error instanceof SovaraError ? error.message : "operation failed"}; recording or retrieval may be incomplete`,
       );
-    exportFailed = true;
+    operationFailed = true;
     status(
       ctx,
       error instanceof SovaraError ? error.message : "operation failed",
     );
   };
   const guarded = async (ctx: ExtensionContext, work: () => Promise<void>) => {
+    const active = recorder;
     try {
       await work();
     } catch (error) {
       report(ctx, error);
+    } finally {
+      for (const current of new Set([active, recorder]))
+        for (const error of current?.takeExportErrors() ?? [])
+          report(ctx, error);
     }
   };
   async function cleanup(): Promise<void> {
     restoreParent();
     const previous = recorder;
     recorder = undefined;
-    retrievalSuffix = new RetrievalSuffix();
+    summaryCapture = undefined;
     await previous?.close("SessionClosed");
   }
 
@@ -81,7 +80,7 @@ export default function sovara(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       ctx.ui.notify(
         recorder
-          ? `Project: ${recorder.config.projectName}\nRecording: ${recorder.scope ? "active" : "idle"}${exportFailed ? "\nA Sovara operation failed; export may be incomplete." : ""}`
+          ? `Project: ${recorder.config.projectName}\nRecording: ${recorder.scope ? "active" : "idle"}${operationFailed ? "\nA Sovara operation failed; export may be incomplete." : ""}`
           : "Sovara is unavailable. Check your connection and reload.",
         "info",
       );
@@ -92,7 +91,7 @@ export default function sovara(pi: ExtensionAPI): void {
     let initialized = false;
     await guarded(ctx, async () => {
       await cleanup();
-      exportFailed = false;
+      operationFailed = false;
       const config = await loadConfig(
         ctx.cwd,
         undefined,
@@ -150,16 +149,13 @@ export default function sovara(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (!recorder) return;
-    summaryPending = false;
-    summaryStartedAt = undefined;
-    summaryPayload = undefined;
+    summaryCapture = undefined;
     restoreParent();
     await guarded(ctx, async () => {
-      exportFailed = false;
+      operationFailed = false;
       await recorder!.start(
-        event.messageType === "user"
-          ? event.prompt
-          : JSON.stringify(event.message.content),
+        event.messageType === "user" ? event.prompt : event.message.content,
+        ctx.signal,
       );
       process.env[PARENT_ENV] = JSON.stringify({
         url: recorder!.config.execUrl,
@@ -172,56 +168,40 @@ export default function sovara(pi: ExtensionAPI): void {
 
   pi.on("context_with_system", async (event, ctx) => {
     const active = recorder;
-    if (!active?.scope?.turnId || summaryPending) return;
+    if (!active?.scope?.turnId || summaryCapture) return;
     let messages = cleanMessages(event.messages);
-    try {
-      const query = retrievalSuffix.context(messages);
-      const result = await active.retrieve(query.context, ctx.signal);
-      const block = lessonBlock(result);
-      active.retrieval = {
-        ...active.retrieval,
-        injected_lesson_ids: block.ids,
-        injected_text: block.text,
-        query_truncated: query.truncated,
-        injection_truncated: block.truncated,
-      };
-      if (block.text) messages = [...messages, referenceMessage(block.text)];
-    } catch (error) {
-      report(ctx, error);
-    }
-    if (active.retrievalExportError) report(ctx, active.retrievalExportError);
-    active.context = structuredClone(messages);
+    await guarded(ctx, async () => {
+      messages = await active.prepareContext(messages, ctx.signal);
+    });
     return { messages };
   });
 
   pi.on("before_provider_request", async (event, ctx) => {
-    if (summaryPending) {
-      summaryPayload = structuredClone(event.payload);
+    if (summaryCapture) {
+      summaryCapture.payload = structuredClone(event.payload);
       return;
     }
     await guarded(ctx, async () => {
       await recorder?.beginGeneration(
         structuredClone(event.payload),
         ctx.model,
+        ctx.signal,
       );
     });
   });
   pi.on("message_update", (event) => {
-    const active = recorder;
     if (
-      active?.generation &&
-      active.firstTokenAt === undefined &&
       ["text_delta", "thinking_delta", "toolcall_delta"].includes(
         event.assistantMessageEvent.type,
       )
     )
-      active.firstTokenAt = Date.now();
+      recorder?.noteFirstToken();
   });
   pi.on("message_end", async (event, ctx) => {
     const message = event.message;
     if (message.role === "assistant")
       await guarded(ctx, async () => {
-        await recorder?.endGeneration(message);
+        await recorder?.endGeneration(message, ctx.signal);
       });
   });
   pi.on("tool_execution_start", async (event, ctx) => {
@@ -231,6 +211,7 @@ export default function sovara(pi: ExtensionAPI): void {
         event.toolName,
         structuredClone(event.args),
         event.parentToolCallId,
+        ctx.signal,
       );
     });
   });
@@ -240,6 +221,7 @@ export default function sovara(pi: ExtensionAPI): void {
         event.toolCallId,
         structuredClone(event.result),
         event.isError,
+        ctx.signal,
       );
     });
   });
@@ -251,7 +233,7 @@ export default function sovara(pi: ExtensionAPI): void {
     if (recorder)
       status(
         ctx,
-        exportFailed ? "export incomplete" : "turn export acknowledged",
+        operationFailed ? "export incomplete" : "turn export acknowledged",
       );
   });
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -263,12 +245,17 @@ export default function sovara(pi: ExtensionAPI): void {
     entry: unknown,
     ctx: ExtensionContext,
   ): Promise<void> {
+    const captured = summaryCapture;
+    summaryCapture = undefined;
     if (!entry || !recorder) return;
     const active = recorder;
     const ownsTurn = !active.scope;
+    const signal = captured?.signal?.aborted
+      ? AbortSignal.timeout(1000)
+      : (ctx.signal ?? AbortSignal.timeout(10000));
     await guarded(ctx, async () => {
       try {
-        if (ownsTurn) await active.start(name);
+        if (ownsTurn) await active.start(name, signal);
         const step = await active.client.prepare(
           active.scope!,
           "pi.summary",
@@ -277,37 +264,35 @@ export default function sovara(pi: ExtensionAPI): void {
             body: { model: ctx.model?.id },
             summary_kind: name,
             capture: "pi-summary-event",
-            provider_payload: summaryPayload,
-            input_unavailable: summaryPayload === undefined,
+            provider_payload: captured?.payload,
+            input_unavailable: captured?.payload === undefined,
           },
+          signal,
         );
-        if (summaryStartedAt !== undefined) step.started = summaryStartedAt;
+        if (captured) step.started = captured.started;
         await active.client.finish(
           step,
           withUsage(entry),
           (entry as { status?: string }).status === "error"
             ? "SummaryFailed"
             : undefined,
+          undefined,
+          signal,
         );
       } finally {
-        summaryStartedAt = undefined;
-        summaryPayload = undefined;
         if (ownsTurn) await active.close();
       }
     });
   }
-  pi.on("session_before_compact", () => {
-    summaryPending = true;
-    summaryStartedAt = Date.now();
-    summaryPayload = undefined;
+  pi.on("session_before_compact", (event) => {
+    summaryCapture = { started: Date.now(), signal: event.signal };
   });
   pi.on("session_before_tree", (event) => {
-    summaryPending = event.preparation.userWantsSummary;
-    summaryStartedAt = Date.now();
-    summaryPayload = undefined;
+    summaryCapture = event.preparation.userWantsSummary
+      ? { started: Date.now(), signal: event.signal }
+      : undefined;
   });
   pi.on("session_compact_failed", async (event, ctx) => {
-    summaryPending = false;
     await summary(
       "Compaction failed",
       { aborted: event.aborted, status: "error" },
@@ -315,11 +300,9 @@ export default function sovara(pi: ExtensionAPI): void {
     );
   });
   pi.on("session_compact", async (event, ctx) => {
-    summaryPending = false;
     await summary("Compaction", event.compactionEntry, ctx);
   });
   pi.on("session_tree", async (event, ctx) => {
-    summaryPending = false;
     await summary("Branch summary", event.summaryEntry, ctx);
   });
 }
