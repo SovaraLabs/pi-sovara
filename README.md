@@ -2,28 +2,30 @@
 
 Record Pi sessions in Sovara and automatically retrieve relevant project lessons before each model step.
 Requires **Pi 1.2.0+ (1.x)**, **Node.js 22.19+**, and a Sovara exec server supporting **runner-api 4**.
-This package is experimental and has not been published to npm yet.
+This is an early release. See the tracing limitations below.
 
 ## Install
 
-Until the first release, install the implementation branch from GitHub:
+Install once, then start Pi normally from your project directory:
 
 ```sh
-pi install git:github.com/SovaraLabs/pi-sovara@codex/pi-integration
+pi install npm:@sovara/pi
+pi
 ```
 
-Or clone and install a local checkout:
+Inside an existing Pi session, run `/reload` after installation. Use `/sovara` to see the
+selected server, local/remote mode, project, authentication state, and any recovery instructions.
+Pi loads the TypeScript entry point directly; no build step is needed. Pi supplies its own runtime;
+the extension does not install another Pi or download/start a remote Sovara server.
 
-```sh
-git clone https://github.com/SovaraLabs/pi-sovara.git
-cd pi-sovara
-git switch codex/pi-integration
-npm ci
-pi install "$PWD"
-```
+For a local connection, install the [Sovara CLI](https://docs.sovara-labs.com/cli/install)
+and sign in with Sovara. For a remote connection, select and sign in to that server in Sovara
+Desktop/CLI; the Pi extension reuses the saved selection and session. A headless setup can instead
+set `SOVARA_EXEC_SERVER_URL` and `SOVARA_AGENT_TOKEN` without installing the CLI.
 
-After publication, the npm installation command will be `pi install npm:@sovara/pi`.
-Pi loads the TypeScript entry point directly; no build step is needed.
+Update with `pi update`, then `/reload`. Remove with `pi remove npm:@sovara/pi`.
+If you previously installed a Git/local checkout, remove that package with `pi remove <original-source>`
+before adding the npm package, so the extension is loaded only once.
 
 ## Try it from a checkout
 
@@ -83,6 +85,9 @@ unrelated folders have the same basename.
 User defaults live in `~/.pi/agent/sovara.json` (or `$PI_CODING_AGENT_DIR/sovara.json`).
 This user-level file also accepts `execUrl`. Project files cannot redirect credentials.
 The server environment override takes precedence over the user-level URL.
+Connection and credential changes take effect after `/reload` (or restarting Pi).
+A reachable server is not proof that your credentials can write to the selected project;
+authorization is checked when the first turn opens its recording.
 
 ## Automatic lesson retrieval
 
@@ -176,11 +181,14 @@ when you do not want session contents sent to Sovara.
 ```sh
 npm ci
 npm run check
-npm pack --dry-run
+npm run test:package
 ```
 
 Tests include Pi's actual extension loader and agent loop with a synthetic provider. They verify
 suffix extraction, direct API retrieval, lesson injection, and tracing without paid model calls.
+The package smoke test serves the actual npm tarball through a temporary registry, installs it
+with Pi into an isolated agent directory, and runs the same integration and connection/startup
+checks against the installed files. It never changes your Pi settings or uses your npm credentials.
 
 An optional test runs the real Sovara exec server against a temporary database and verifies persisted
 turns, steps, token usage, project creation, session continuation, and the lesson badge/detail
@@ -192,4 +200,5 @@ SOVARA_SOURCE_DIR=/path/to/sovara npm run test:backend
 
 The Sovara checkout needs its `.venv` populated by `uv sync`. This test never uses your normal
 Sovara database or hosted project and makes no paid model calls. It currently targets the runner-api 4
-implementation. CI runs the standalone checks on Node 22 and 24; it does not publish packages.
+implementation. CI runs the standalone and package checks on Node 22 and 24. See [RELEASING.md](https://github.com/SovaraLabs/pi-sovara/blob/main/RELEASING.md)
+for tag releases through npm trusted publishing.

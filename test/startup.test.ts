@@ -3,13 +3,21 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { SovaraClient } from "../src/client.ts";
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+const { SovaraClient }: typeof import("../src/client.ts") = await import(
+  pathToFileURL(
+    resolve(process.env.SOVARA_TEST_PACKAGE_ROOT ?? ".", "src/client.ts"),
+  ).href
+);
 
 const config = {
   projectName: "test",
   execUrl: "http://127.0.0.1:5960",
   authHeaders: {},
   autoStartLocal: true,
+  connectionKind: "local" as const,
+  authentication: "none" as const,
 };
 const metadata = {
   compatibility: { component: "exec-server", contracts: { "runner-api": [4] } },

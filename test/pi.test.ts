@@ -130,7 +130,9 @@ test("real Pi loader retrieves and injects the conversation suffix", async () =>
       cwd,
       agentDir,
       settingsManager: settings,
-      additionalExtensionPaths: [resolve("src/index.ts")],
+      additionalExtensionPaths: [
+        resolve(process.env.SOVARA_TEST_PACKAGE_ROOT ?? ".", "src/index.ts"),
+      ],
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,

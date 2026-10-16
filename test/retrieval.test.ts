@@ -150,6 +150,8 @@ test("retrieval rejects malformed responses at the boundary", async () => {
       execUrl: "https://fixture.invalid",
       authHeaders: {},
       autoStartLocal: false,
+      connectionKind: "override" as const,
+      authentication: "none" as const,
     },
     fetcher,
   );

@@ -2,10 +2,11 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { loadConfig } from "./config.ts";
-import { SovaraClient, SovaraError, type Scope } from "./client.ts";
+import { loadConfig, type Config } from "./config.ts";
+import { SovaraClient, type Scope } from "./client.ts";
 import { Recorder, withUsage } from "./recorder.ts";
 import { cleanMessages } from "./lessons.ts";
+import { connectionDetails, explainError } from "./diagnostics.ts";
 
 const PARENT_ENV = "SOVARA_PI_PARENT";
 const CONFIG_ENTRY = "sovara-config-v1";
@@ -32,6 +33,8 @@ function inheritedParent(): Parent | undefined {
 
 export default function sovara(pi: ExtensionAPI): void {
   let recorder: Recorder | undefined;
+  let selectedConfig: Config | undefined;
+  let lastError: string | undefined;
   let operationFailed = false;
   let lastRetrievalWarning: string | undefined;
   let summaryCapture:
@@ -46,15 +49,13 @@ export default function sovara(pi: ExtensionAPI): void {
     if (ctx.hasUI) ctx.ui.setStatus("sovara", `sovara: ${text}`);
   };
   const report = (ctx: ExtensionContext, error: unknown) => {
-    if (!ctx.hasUI && !operationFailed)
-      console.error(
-        `[sovara-pi] ${error instanceof SovaraError ? error.message : "operation failed"}; recording or retrieval may be incomplete`,
-      );
+    lastError = explainError(error, selectedConfig);
+    if (!operationFailed) {
+      if (ctx.hasUI) ctx.ui.notify(lastError, "warning");
+      else console.error(`[sovara-pi] ${lastError}`);
+    }
     operationFailed = true;
-    status(
-      ctx,
-      error instanceof SovaraError ? error.message : "operation failed",
-    );
+    status(ctx, "operation failed — /sovara for details");
   };
   const guarded = async (ctx: ExtensionContext, work: () => Promise<void>) => {
     const active = recorder;
@@ -79,12 +80,16 @@ export default function sovara(pi: ExtensionAPI): void {
   pi.registerCommand("sovara", {
     description: "Show Sovara project and recording status",
     handler: async (_args, ctx) => {
-      ctx.ui.notify(
-        recorder
-          ? `Project: ${recorder.config.projectName}\nRecording: ${recorder.scope ? "active" : "idle"}${recorder.retrievalWarning ? `\nLessons: ${recorder.retrievalWarning}` : ""}${operationFailed ? "\nA Sovara operation failed; export may be incomplete." : ""}`
-          : "Sovara is unavailable. Check your connection and reload.",
-        "info",
+      const lines = selectedConfig
+        ? connectionDetails(selectedConfig, !!recorder)
+        : ["Sovara configuration could not be loaded."];
+      lines.push(
+        `Recording: ${recorder ? (recorder.scope ? "active" : "idle") : "unavailable"}`,
       );
+      if (recorder?.retrievalWarning)
+        lines.push(`Lessons: ${recorder.retrievalWarning}`);
+      if (lastError) lines.push(`Last error: ${lastError}`);
+      ctx.ui.notify(lines.join("\n"), lastError ? "warning" : "info");
     },
   });
 
@@ -93,6 +98,8 @@ export default function sovara(pi: ExtensionAPI): void {
     await guarded(ctx, async () => {
       await cleanup();
       operationFailed = false;
+      selectedConfig = undefined;
+      lastError = undefined;
       lastRetrievalWarning = undefined;
       const config = await loadConfig(
         ctx.cwd,
@@ -100,6 +107,7 @@ export default function sovara(pi: ExtensionAPI): void {
         undefined,
         ctx.isProjectTrusted(),
       );
+      selectedConfig = config;
       const parent = inheritedParent();
       // A resumed session keeps its original project binding.
       const entries = ctx.sessionManager.getEntries();
@@ -155,6 +163,7 @@ export default function sovara(pi: ExtensionAPI): void {
     restoreParent();
     await guarded(ctx, async () => {
       operationFailed = false;
+      lastError = undefined;
       await recorder!.start(
         event.messageType === "user" ? event.prompt : event.message.content,
         ctx.signal,

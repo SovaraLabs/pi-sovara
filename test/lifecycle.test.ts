@@ -382,3 +382,25 @@ test("a failed retrieval response is recorded as failure while Pi continues", as
     await h.close();
   }
 });
+
+test("sovara command retains server and recovery instructions when connection fails", async () => {
+  const h = await harness();
+  try {
+    h.backend.versions([5]);
+    await h.start();
+    await h.command("sovara");
+    const text = h.notifications.at(-1)!;
+    assert.match(text, new RegExp(h.backend.config.execUrl));
+    assert.match(text, /Mode: explicit URL override/);
+    assert.match(text, /Connection: unavailable/);
+    assert.match(text, /compatible Sovara\/Pi extension versions/);
+    assert.doesNotMatch(text, /agent-secret|recording-secret/);
+    h.backend.versions([4]);
+    await h.emit("session_start", { reason: "reload" });
+    await h.command("sovara");
+    assert.match(h.notifications.at(-1)!, /Connection: server reachable/);
+    assert.doesNotMatch(h.notifications.at(-1)!, /Last error/);
+  } finally {
+    await h.close();
+  }
+});

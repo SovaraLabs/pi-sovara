@@ -3,7 +3,61 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../src/config.ts";
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { fixtureServer } from "./helpers.ts";
+const { loadConfig }: typeof import("../src/config.ts") = await import(
+  pathToFileURL(
+    resolve(process.env.SOVARA_TEST_PACKAGE_ROOT ?? ".", "src/config.ts"),
+  ).href
+);
+
+test("saved remote session authenticates recording at its selected gateway", async () => {
+  const home = await mkdtemp(join(tmpdir(), "pi-remote-auth-"));
+  const server = await fixtureServer();
+  const { SovaraClient }: typeof import("../src/client.ts") = await import(
+    pathToFileURL(
+      resolve(process.env.SOVARA_TEST_PACKAGE_ROOT ?? ".", "src/client.ts"),
+    ).href
+  );
+  try {
+    await mkdir(join(home, ".sovara"));
+    await writeFile(
+      join(home, ".sovara/app_connection.json"),
+      JSON.stringify({
+        version: 2,
+        active_app_origin: server.config.execUrl,
+        connections: [{ kind: "remote", app_origin: server.config.execUrl }],
+      }),
+    );
+    await writeFile(
+      join(home, ".sovara/app_session.json"),
+      JSON.stringify({
+        version: 1,
+        session_token: "synthetic-session",
+        expires_at: "2099-01-01",
+      }),
+    );
+    const config = await loadConfig(home, home, {});
+    assert.equal(config.connectionKind, "remote");
+    assert.equal(config.authentication, "session");
+    assert.equal(config.autoStartLocal, false);
+    const client = new SovaraClient(config, fetch, async () =>
+      assert.fail("remote must not start local CLI"),
+    );
+    await client.connect();
+    await client.register("remote-fixture", home);
+    assert.equal(
+      server.calls.find((call) => call.path === "/runner/register")?.headers[
+        "x-sovara-platform-session"
+      ],
+      "synthetic-session",
+    );
+  } finally {
+    await server.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test("project defaults and overrides", async () => {
   const home = await mkdtemp(join(tmpdir(), "pi-config-"));
@@ -145,6 +199,51 @@ test("automatic startup follows connection provenance, not just a loopback URL",
       JSON.stringify({ execUrl: "http://127.0.0.1:5960" }),
     );
     assert.equal((await loadConfig(home, home, env)).autoStartLocal, false);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("connection diagnostics distinguish saved remote, expired session and explicit token", async () => {
+  const home = await mkdtemp(join(tmpdir(), "pi-diagnostics-config-"));
+  try {
+    await mkdir(join(home, ".sovara"));
+    await writeFile(
+      join(home, ".sovara", "app_connection.json"),
+      JSON.stringify({
+        version: 1,
+        mode: "remote",
+        remote_server_url: "https://remote.example",
+      }),
+    );
+    await writeFile(
+      join(home, ".sovara", "app_session.json"),
+      JSON.stringify({
+        version: 1,
+        session_token: "private-expired-session",
+        expires_at: "2000-01-01",
+      }),
+    );
+    const expired = await loadConfig(home, home, {});
+    assert.equal(expired.connectionKind, "remote");
+    assert.equal(expired.authentication, "expired");
+    assert.deepEqual(expired.authHeaders, {});
+    const token = await loadConfig(home, home, {
+      SOVARA_AGENT_TOKEN: "private-agent-token",
+    });
+    assert.equal(token.authentication, "agent-token");
+    assert.equal(token.connectionKind, "remote");
+    const override = await loadConfig(home, home, {
+      SOVARA_EXEC_SERVER_URL: "http://127.0.0.1:5970",
+    });
+    assert.equal(override.connectionKind, "override");
+    assert.equal(override.authentication, "none");
+    await assert.rejects(
+      loadConfig(home, home, {
+        SOVARA_EXEC_SERVER_URL: "invalid-private-origin",
+      }),
+      /Invalid Sovara server origin/,
+    );
   } finally {
     await rm(home, { recursive: true, force: true });
   }

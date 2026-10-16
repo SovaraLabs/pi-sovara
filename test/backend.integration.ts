@@ -33,6 +33,8 @@ test(
         execUrl,
         authHeaders: {},
         autoStartLocal: false,
+        connectionKind: "override" as const,
+        authentication: "none" as const,
       };
       let retrievalResponse: unknown;
       const client = new SovaraClient(config, async (input, init) => {
