@@ -10,7 +10,6 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Config } from "./config.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
-  cleanMessages,
   lessonBlock,
   referenceMessage,
   RetrievalSuffix,
@@ -78,9 +77,8 @@ export class Recorder {
     messages: AgentMessage[],
     signal?: AbortSignal,
   ): Promise<AgentMessage[]> {
-    const clean = cleanMessages(messages);
-    this.setContext(clean);
-    const query = this.suffix.context(clean);
+    this.setContext(messages);
+    const query = this.suffix.context(messages);
     const result = await this.retrieve(query.context, signal);
     const block = lessonBlock(result);
     const warnings = [result.warning_message];
@@ -103,8 +101,8 @@ export class Recorder {
     this.retrievalWarning =
       this.retrieval.warning_message || this.retrieval.error_message;
     const prepared = block.text
-      ? [...clean, referenceMessage(block.text)]
-      : clean;
+      ? [...messages, referenceMessage(block.text)]
+      : messages;
     this.setContext(prepared);
     return prepared;
   }

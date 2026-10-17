@@ -160,6 +160,29 @@ test("child processes inherit project and restore parent credentials", async () 
   }
 });
 
+test("context retains earlier lessons while appending newly retrieved lessons", async () => {
+  const h = await harness();
+  try {
+    await h.start();
+    await h.prompt();
+    const messages = [
+      { role: "user", content: "task", timestamp: 1 },
+      {
+        role: "custom", customType: "sovara-lessons",
+        content: "Earlier guidance", display: false, timestamp: 2,
+      },
+      { role: "user", content: "continue", timestamp: 3 },
+    ];
+    const result = await h.emit("context_with_system", { messages });
+    assert.deepEqual(result.messages.slice(0, messages.length), messages);
+    assert.equal(result.messages.length, messages.length + 1);
+    assert.equal(result.messages.at(-1).customType, "sovara-lessons");
+    assert.equal(messages.length, 3);
+  } finally {
+    await h.close();
+  }
+});
+
 test("retrieval failure leaves context intact; export failure never reports success", async () => {
   const h = await harness();
   try {
@@ -169,6 +192,10 @@ test("retrieval failure leaves context intact; export failure never reports succ
     const messages = [
       { role: "system", content: "system" },
       { role: "user", content: "task", timestamp: 1 },
+      {
+        role: "custom", customType: "sovara-lessons",
+        content: "Earlier guidance", display: false, timestamp: 2,
+      },
     ];
     const result = await h.emit("context_with_system", { messages });
     assert.deepEqual(result.messages, messages);

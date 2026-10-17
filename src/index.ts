@@ -5,7 +5,6 @@ import type {
 import { loadConfig, type Config } from "./config.ts";
 import { SovaraClient, type Scope } from "./client.ts";
 import { Recorder, withUsage } from "./recorder.ts";
-import { cleanMessages } from "./lessons.ts";
 import { connectionDetails, explainError } from "./diagnostics.ts";
 
 const PARENT_ENV = "SOVARA_PI_PARENT";
@@ -180,7 +179,7 @@ export default function sovara(pi: ExtensionAPI): void {
   pi.on("context_with_system", async (event, ctx) => {
     const active = recorder;
     if (!active?.scope?.turnId || summaryCapture) return;
-    let messages = cleanMessages(event.messages);
+    let messages = event.messages;
     await guarded(ctx, async () => {
       messages = await active.prepareContext(messages, ctx.signal);
       const warning = active.retrievalWarning;
