@@ -212,6 +212,35 @@ test("retrieval failure leaves context intact; export failure never reports succ
   }
 });
 
+for (const summary of [false, true]) {
+  test(`Palantir ${summary ? "summary" : "generation"} records the returned cache payload`, async () => {
+    const h = await harness();
+    try {
+      Object.assign(h.ctx.model, {
+        provider: "palantir", api: "openai-responses",
+        compat: { supportsExplicitPromptCacheMode: true },
+      });
+      await h.start();
+      await h.prompt();
+      if (summary) await h.emit("session_before_compact");
+      const input = {
+        prompt_cache_key: "session",
+        input: [{ type: "function_call_output", call_id: "one", output: "evidence" }],
+      };
+      const sent = await h.emit("before_provider_request", { payload: input });
+      assert.deepEqual(sent.input[0].output[0].prompt_cache_breakpoint, { mode: "explicit" });
+      assert.equal(input.input[0]!.output, "evidence");
+      if (summary) await h.emit("session_compact", {
+        compactionEntry: { summary: "summary", usage: { input: 3, output: 2 } },
+      });
+      const prepared = h.backend.calls.filter((c) => c.path.endsWith("/prepare")).at(-1)!;
+      assert.deepEqual(JSON.parse(prepared.body.input_json).raw.provider_payload, sent);
+    } finally {
+      await h.close();
+    }
+  });
+}
+
 test("compaction produces one summary observation without a dangling model step", async () => {
   const h = await harness();
   try {

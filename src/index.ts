@@ -6,6 +6,7 @@ import { loadConfig, type Config } from "./config.ts";
 import { SovaraClient, type Scope } from "./client.ts";
 import { Recorder, withUsage } from "./recorder.ts";
 import { connectionDetails, explainError } from "./diagnostics.ts";
+import { withPalantirCacheBreakpoints } from "./palantir-cache.ts";
 
 const PARENT_ENV = "SOVARA_PI_PARENT";
 const CONFIG_ENTRY = "sovara-config-v1";
@@ -193,17 +194,19 @@ export default function sovara(pi: ExtensionAPI): void {
   });
 
   pi.on("before_provider_request", async (event, ctx) => {
+    const payload = withPalantirCacheBreakpoints(event.payload, ctx.model);
     if (summaryCapture) {
-      summaryCapture.payload = structuredClone(event.payload);
-      return;
+      summaryCapture.payload = structuredClone(payload);
+      return payload;
     }
     await guarded(ctx, async () => {
       await recorder?.beginGeneration(
-        structuredClone(event.payload),
+        structuredClone(payload),
         ctx.model,
         ctx.signal,
       );
     });
+    return payload;
   });
   pi.on("message_update", (event) => {
     if (

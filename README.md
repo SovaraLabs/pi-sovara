@@ -39,6 +39,16 @@ To uninstall:
 pi remove npm:@sovara/pi
 ```
 
+## Palantir prompt caching
+
+For Palantir models that support explicit prompt caching (verified with Sol 6.1),
+set `"supportsExplicitPromptCacheMode": true` in the model's `compat` object in
+Pi's `models.json`. The provider must be named `palantir` and use `openai-responses`.
+Sovara then adds cache breakpoints to tool results so changing lessons do not
+prevent reuse of the preceding conversation. Lessons remain request-only.
+Other providers are unchanged; requests without a cache key, including
+`cacheRetention: "none"`, receive no added breakpoints.
+
 ## License
 
 MIT.
