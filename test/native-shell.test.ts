@@ -17,6 +17,7 @@ import {
   AgentSession,
   createAgentSession,
   createBashTool,
+  createBashToolDefinition,
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
@@ -26,6 +27,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { SovaraClient } from "@sovara/sdk";
 import { fixtureServer, completion } from "./helpers.ts";
+
+// A caller may have acquired the public getter before the extension was loaded.
+const capturedGetDefinition = AgentSession.prototype.getToolDefinition;
 
 async function harness() {
   const server = await fixtureServer(),
@@ -93,7 +97,7 @@ async function harness() {
     hold(value: boolean) {
       hold = value;
     },
-    async session(id: string, mode?: "custom" | "base") {
+    async session(id: string, mode?: "custom" | "base" | "late") {
       const cwd = join(directory, id),
         agentDir = join(cwd, "agent");
       await mkdir(join(cwd, ".pi"), { recursive: true });
@@ -132,6 +136,24 @@ async function harness() {
           };
         },
       };
+      const extensionPath = resolve(
+        process.env.SOVARA_TEST_PACKAGE_ROOT ?? ".",
+        "src/index.ts",
+      );
+      const lateLoader = join(cwd, "late-loader.ts");
+      // Pi supplies its bundled-peer aliases; defer only invoking the extension
+      // factory until this public command runs in the already-existing session.
+      await writeFile(
+        lateLoader,
+        `import sovara from ${JSON.stringify(extensionPath)};
+export default function(pi) { pi.registerCommand("controlled-load-sovara", {
+  description: "Controlled delayed extension initialization", handler: async () => sovara(pi),
+}); }`,
+      );
+      const extensionPaths = [
+        lateLoader,
+        ...(mode === "late" ? [] : [extensionPath]),
+      ];
       const loader = new DefaultResourceLoader({
         cwd,
         agentDir,
@@ -145,9 +167,7 @@ async function harness() {
             });
           },
         ],
-        additionalExtensionPaths: [
-          resolve(process.env.SOVARA_TEST_PACKAGE_ROOT ?? ".", "src/index.ts"),
-        ],
+        additionalExtensionPaths: extensionPaths,
         noSkills: true,
         noPromptTemplates: true,
         noThemes: true,
@@ -168,6 +188,10 @@ async function harness() {
       if (mode === "base") {
         const agent = session.agent,
           sessionManager = session.sessionManager;
+        await session.extensionRunner.emit({
+          type: "session_shutdown",
+          reason: "quit",
+        });
         session.dispose();
         await loader.reload();
         const base = createBashTool(cwd, {
@@ -205,6 +229,14 @@ async function harness() {
         custom,
         cwd,
         customCalls: () => customCalls,
+        async unload() {
+          extensionPaths.length = 1;
+          await session.reload();
+        },
+        async loadLate() {
+          await session.prompt("/controlled-load-sovara");
+          await session.bindExtensions({ mode: "print" });
+        },
         parent: () =>
           JSON.parse(
             results
@@ -295,8 +327,12 @@ for (const inherited of [false, true])
       await chmod(shellPath, 0o755);
       a.settings.setShellPath(shellPath);
       await a.prompt();
-      assert.equal(await readFile(shellMarker, "utf8"), "selected");
-      assert.equal(a.parent().marker, "changed");
+      assert.equal(
+        a.parent().marker,
+        "first",
+        "Native factories retain their settings until reload",
+      );
+      await assert.rejects(readFile(shellMarker, "utf8"), { code: "ENOENT" });
       assert.notEqual(a.parent().parent.turnId, first.parent.turnId);
       await a.session.reload();
       assert.equal(
@@ -305,6 +341,8 @@ for (const inherited of [false, true])
         "reload releases old definition ownership",
       );
       await a.prompt();
+      assert.equal(await readFile(shellMarker, "utf8"), "selected");
+      assert.equal(a.parent().marker, "changed");
       assert.equal(a.parent().parent.traceId, expected);
       assert.equal(process.env.SOVARA_PI_PARENT, startup);
       const current = a.session.getToolDefinition("bash")!;
@@ -324,6 +362,119 @@ for (const inherited of [false, true])
       await h.close();
     }
   });
+
+test("a session rebuilt while unloaded cannot authorize unseen factory closures on reload", async () => {
+  const h = await harness();
+  try {
+    const a = await h.session("A");
+    await a.prompt();
+    await a.unload();
+    const definition = capturedGetDefinition.call(a.session, "bash")!;
+    let calls = 0;
+    const replacement = createBashToolDefinition(a.cwd, {
+      operations: {
+        exec: async (_command, _cwd, { onData }) => {
+          calls++;
+          onData(Buffer.from("unloaded caller execution"));
+          return { exitCode: 0 };
+        },
+      },
+    }).execute;
+    definition.execute = replacement;
+    await a.loadLate();
+    await a.prompt();
+    assert.equal(calls, 1);
+    assert.equal(definition.execute, replacement);
+  } finally {
+    await h.close();
+  }
+});
+
+test("public observers preserve descriptors, receivers, other owners and later wrappers", async () => {
+  const h = await harness();
+  const prototype = AgentSession.prototype;
+  const active = Object.getOwnPropertyDescriptor(
+    prototype,
+    "getActiveToolNames",
+  )!;
+  const definition = Object.getOwnPropertyDescriptor(
+    prototype,
+    "getToolDefinition",
+  )!;
+  const receivers: AgentSession[] = [];
+  const earlier = function (this: AgentSession, ...args: unknown[]) {
+    receivers.push(this);
+    return Reflect.apply(active.value, this, args);
+  };
+  Object.defineProperty(prototype, "getActiveToolNames", {
+    ...active,
+    value: earlier,
+  });
+  try {
+    const a = await h.session("A"),
+      b = await h.session("B");
+    a.session.getActiveToolNames();
+    b.session.getActiveToolNames();
+    for (const [name, original] of [
+      ["getActiveToolNames", active],
+      ["getToolDefinition", definition],
+    ] as const) {
+      const current = Object.getOwnPropertyDescriptor(prototype, name)!;
+      assert.deepEqual({ ...current, value: original.value }, original);
+    }
+    const state = a.session.agent.state;
+    const descriptor = Object.getOwnPropertyDescriptor(state, "tools")!;
+    let setterReceiver: unknown;
+    const laterSetter = function (this: unknown, value: unknown) {
+      setterReceiver = this;
+      Reflect.apply(descriptor.set!, this, [value]);
+    };
+    Object.defineProperty(state, "tools", { ...descriptor, set: laterSetter });
+    const tools = state.tools;
+    state.tools = tools;
+    assert.equal(setterReceiver, state);
+    assert.notEqual(
+      state.tools,
+      tools,
+      "Native setter still copies the caller array",
+    );
+    assert.equal(
+      Object.getOwnPropertyDescriptor(state, "tools")!.get,
+      descriptor.get,
+    );
+    await a.prompt();
+    await a.session.extensionRunner.emit({
+      type: "session_shutdown",
+      reason: "quit",
+    });
+    await b.prompt();
+    assert.equal(b.parent().parent.projectName, "shell-B");
+    assert.equal(
+      Object.getOwnPropertyDescriptor(state, "tools")!.set,
+      laterSetter,
+    );
+    assert.ok(receivers.includes(a.session) && receivers.includes(b.session));
+    const wrappedGetter = prototype.getToolDefinition;
+    let getterReceiver: unknown;
+    const laterGetter: typeof wrappedGetter = function (
+      this: AgentSession,
+      name,
+    ) {
+      getterReceiver = this;
+      return Reflect.apply(wrappedGetter, this, [name]);
+    };
+    prototype.getToolDefinition = laterGetter;
+    await h.close();
+    assert.equal(prototype.getActiveToolNames, earlier);
+    assert.equal(prototype.getToolDefinition, laterGetter);
+    assert.equal(laterGetter.call(b.session, "bash")?.name, "bash");
+    assert.equal(getterReceiver, b.session);
+  } finally {
+    await h.close();
+    Object.defineProperty(prototype, "getActiveToolNames", active);
+    Object.defineProperty(prototype, "getToolDefinition", definition);
+  }
+});
 
 test("overlapping native bash sessions keep their own projects in both completion orders", async () => {
   const h = await harness();
@@ -498,3 +649,127 @@ test("a pre-existing native execute wrapper remains caller-owned", async () => {
     await h.close();
   }
 });
+
+for (const exposure of [
+  "definition",
+  "captured-getter",
+  "lists",
+  "state-tools",
+] as const)
+  test(`public ${exposure} exposure cannot bless a customized native factory executor`, async () => {
+    const h = await harness();
+    try {
+      const a = await h.session("A");
+      // Lists expose metadata, while state.tools exposes the callable wrapper.
+      if (exposure === "lists") {
+        assert.ok(a.session.getAllTools().some((tool) => tool.name === "bash"));
+        assert.ok(a.session.getActiveToolNames().includes("bash"));
+        assert.ok(a.session.getCallableToolNames().includes("bash"));
+        assert.ok(a.api.getAllTools().some((tool) => tool.name === "bash"));
+        assert.ok(a.api.getActiveTools().includes("bash"));
+      }
+      const definition =
+        exposure === "definition"
+          ? a.session.getToolDefinition("bash")!
+          : capturedGetDefinition.call(a.session, "bash")!;
+      const target =
+        exposure === "state-tools"
+          ? a.session.agent.state.tools.find((tool) => tool.name === "bash")!
+          : definition;
+      let customCalls = 0;
+      const options = {
+        operations: {
+          exec: async (
+            _command: string,
+            _cwd: string,
+            { onData }: { onData: (chunk: Buffer) => void },
+          ) => {
+            customCalls++;
+            onData(Buffer.from("caller native factory execution"));
+            return { exitCode: 0 };
+          },
+        },
+      };
+      const replacement =
+        exposure === "state-tools"
+          ? createBashTool(a.cwd, options).execute
+          : createBashToolDefinition(a.cwd, options).execute;
+      target.execute = replacement as typeof target.execute;
+      await a.prompt();
+      assert.equal(customCalls, 1);
+      assert.equal(target.execute, replacement);
+      assert.equal(
+        a.results.at(-1).content[0].text,
+        "caller native factory execution",
+      );
+      await a.session.extensionRunner.emit({
+        type: "session_shutdown",
+        reason: "quit",
+      });
+      assert.equal(target.execute, replacement);
+    } finally {
+      await h.close();
+    }
+  });
+
+test("caller native spawnHook and captured options stay unchanged", async () => {
+  const h = await harness();
+  try {
+    const a = await h.session("A"),
+      definition = capturedGetDefinition.call(a.session, "bash")!;
+    let calls = 0;
+    const replacement = createBashToolDefinition(a.cwd, {
+      commandPrefix: "export SHELL_MARKER=caller-prefix",
+      spawnHook: (context) => {
+        calls++;
+        return {
+          ...context,
+          env: { ...context.env, SOVARA_PI_PARENT: "null" },
+        };
+      },
+    }).execute;
+    definition.execute = replacement;
+    await a.prompt();
+    assert.equal(calls, 1);
+    assert.equal(definition.execute, replacement);
+    assert.equal(a.parent().parent, null);
+    assert.equal(a.parent().marker, "caller-prefix");
+  } finally {
+    await h.close();
+  }
+});
+
+for (const customized of [false, true])
+  test(`late extension loading leaves existing native execution untouched (customized: ${customized})`, async () => {
+    const h = await harness();
+    try {
+      const a = await h.session("A", "late"),
+        definition = capturedGetDefinition.call(a.session, "bash")!;
+      let calls = 0;
+      if (customized)
+        definition.execute = createBashToolDefinition(a.cwd, {
+          operations: {
+            exec: async (_command, _cwd, { onData }) => {
+              calls++;
+              onData(Buffer.from("late caller execution"));
+              return { exitCode: 0 };
+            },
+          },
+        }).execute;
+      const original = definition.execute;
+      await a.loadLate();
+      await a.prompt();
+      assert.equal(definition.execute, original);
+      assert.equal(calls, customized ? 1 : 0);
+      if (!customized) assert.equal(a.parent().parent, null);
+      assert.equal(
+        h.server.calls.filter(
+          (call) =>
+            call.path.endsWith("/finalize") && call.body.step_kind === "tool",
+        ).length,
+        1,
+      );
+    } finally {
+      await h.close();
+    }
+  });

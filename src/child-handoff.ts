@@ -11,6 +11,7 @@ import type { Turn } from "@sovara/sdk";
 
 export const PARENT_ENV = "SOVARA_PI_PARENT";
 type Invocation = { owner: Owner; turn?: Turn };
+type ShellSpawn = { pending: boolean };
 type Definition = NonNullable<ReturnType<AgentSession["getToolDefinition"]>>;
 type Owner = {
   manager?: object;
@@ -21,6 +22,19 @@ type Owner = {
   >;
 };
 const key = Symbol.for("sovara.pi.childHandoff.v1");
+const identityKey = Symbol.for("sovara.pi.nativeShellIdentity.v1");
+type ShellIdentities = {
+  sessions: WeakMap<AgentSession, readonly (Definition | undefined)[]>;
+  definitions: WeakMap<Definition, Definition["execute"]>;
+};
+const identities = ((
+  globalThis as typeof globalThis & {
+    [identityKey]?: ShellIdentities;
+  }
+)[identityKey] ??= {
+  sessions: new WeakMap(),
+  definitions: new WeakMap(),
+});
 type Runtime = {
   context: AsyncLocalStorage<Invocation | undefined>;
   sessions: WeakMap<object, Owner>;
@@ -36,6 +50,7 @@ function install(): Runtime {
     throw new Error("Sovara child handoff requires Pi 1.2.0");
   if (shared[key]) return shared[key];
   const context = new AsyncLocalStorage<Invocation | undefined>();
+  const shellSpawn = new AsyncLocalStorage<ShellSpawn>();
   const sessions = new WeakMap<object, Owner>();
   const restore: (() => void)[] = [];
   const runtime: Runtime = {
@@ -70,65 +85,132 @@ function install(): Runtime {
       ? JSON.stringify(invocation.turn.exportParentContext())
       : undefined;
   };
-  function bindNativeShells(session: AgentSession, owner: Owner): void {
-    for (const name of ["bash", "powershell"] as const) {
-      const info = session.getAllTools().find((tool) => tool.name === name);
+  function remember(
+    session: AgentSession,
+    name: string,
+    definition: Definition | undefined,
+  ): void {
+    if (
+      !identities.sessions.has(session) ||
+      !definition ||
+      identities.definitions.has(definition)
+    )
+      return;
+    if (name !== "bash" && name !== "powershell") return;
+    const info = session.getAllTools().find((tool) => tool.name === name);
+    if (
+      info?.sourceInfo.source !== "builtin" ||
+      info.sourceInfo.path !== `builtin:${name}`
+    )
+      return;
+    // In Pi1.2 SDK baseTools overrides are synthesized minimal definitions. Their
+    // executors are caller-owned even though their sourceInfo also says builtin.
+    const template =
+      name === "bash"
+        ? createBashToolDefinition(session.sessionManager.getCwd())
+        : createPowerShellToolDefinition(session.sessionManager.getCwd());
+    if (
+      !Object.keys(template).every((key) => Object.hasOwn(definition, key)) ||
+      definition.parameters !== template.parameters ||
+      definition.outputSchema !== template.outputSchema
+    )
+      return;
+    identities.definitions.set(definition, definition.execute);
+  }
+  // Observe the public creation/publication boundary before callers can acquire
+  // a definition. A session that predates extension initialization is unknown.
+  const watched = new WeakSet<object>();
+  const getActive = AgentSession.prototype.getActiveToolNames;
+  const getDefinition = AgentSession.prototype.getToolDefinition;
+  const currentDefinitions = (session: AgentSession) =>
+    ["bash", "powershell"].map(
+      (name) =>
+        Reflect.apply(getDefinition, session, [name]) as Definition | undefined,
+    );
+  function observe(session: AgentSession): void {
+    const state = session.agent.state;
+    if (watched.has(state)) return;
+    const current = currentDefinitions(session);
+    const previous = identities.sessions.get(session);
+    // Empty registry is Pi1.2's constructor boundary. Reinstall/reload may reuse
+    // only a registry previously observed; an unobserved rebuild is unknown.
+    if (
+      session.getAllTools().length !== 0 &&
+      (!previous ||
+        current.some((definition, index) => definition !== previous[index]))
+    )
+      return;
+    const descriptor = Object.getOwnPropertyDescriptor(state, "tools");
+    if (!descriptor?.configurable || !descriptor.get || !descriptor.set) return;
+    identities.sessions.set(session, current);
+    watched.add(state);
+    const entry = {
+      state,
+      descriptor,
+      wrapper: undefined as ((value: unknown) => void) | undefined,
+    };
+    entry.wrapper = function (this: unknown, value: unknown) {
+      const definitions = currentDefinitions(session);
+      for (const [index, name] of ["bash", "powershell"].entries())
+        remember(session, name, definitions[index]);
+      identities.sessions.set(session, definitions);
+      Reflect.apply(entry.descriptor.set!, this, [value]);
+    };
+    Object.defineProperty(state, "tools", {
+      ...descriptor,
+      set: entry.wrapper,
+    });
+    const weak = new WeakRef(entry);
+    restore.push(() => {
+      const current = weak.deref();
       if (
-        info?.sourceInfo.source !== "builtin" ||
-        info.sourceInfo.path !== `builtin:${name}`
+        current &&
+        Object.getOwnPropertyDescriptor(current.state, "tools")?.set ===
+          current.wrapper
       )
-        continue;
+        Object.defineProperty(current.state, "tools", current.descriptor);
+    });
+  }
+  const activeWrapper: typeof getActive = function (this: AgentSession) {
+    observe(this);
+    return Reflect.apply(getActive, this, []);
+  };
+  AgentSession.prototype.getActiveToolNames = activeWrapper;
+  restore.push(() => {
+    if (AgentSession.prototype.getActiveToolNames === activeWrapper)
+      AgentSession.prototype.getActiveToolNames = getActive;
+  });
+  const definitionWrapper: typeof getDefinition = function (
+    this: AgentSession,
+    name,
+  ) {
+    observe(this);
+    const definition = Reflect.apply(getDefinition, this, [name]);
+    if (watched.has(this.agent.state)) remember(this, name, definition);
+    return definition;
+  };
+  AgentSession.prototype.getToolDefinition = definitionWrapper;
+  restore.push(() => {
+    if (AgentSession.prototype.getToolDefinition === definitionWrapper)
+      AgentSession.prototype.getToolDefinition = getDefinition;
+  });
+  function bindNativeShells(session: AgentSession, owner: Owner): void {
+    for (const name of ["bash", "powershell"]) {
       const definition = session.getToolDefinition(name);
-      if (!definition || owner.shells.has(definition)) continue;
-      const template =
-        name === "bash"
-          ? createBashToolDefinition(session.sessionManager.getCwd())
-          : createPowerShellToolDefinition(session.sessionManager.getCwd());
-      // Pi also labels synthesized SDK base-tool overrides as builtin. Those
-      // omit the native factory's prompt/render fields and must stay untouched.
-      // This pinned-version ownership check also declines third-party execute
-      // wrappers; it is not an attempt to recognize arbitrary future Pi tools.
       if (
-        !Object.keys(template).every((key) => Object.hasOwn(definition, key)) ||
-        definition.parameters !== template.parameters ||
-        definition.outputSchema !== template.outputSchema ||
-        definition.description !== template.description ||
-        definition.promptSnippet !== template.promptSnippet ||
+        !definition ||
+        owner.shells.has(definition) ||
+        identities.definitions.get(definition) !== definition.execute ||
         Object.getOwnPropertyDescriptor(definition, "execute")?.writable !==
-          true ||
-        Function.prototype.toString.call(definition.execute) !==
-          Function.prototype.toString.call(template.execute)
+          true
       )
         continue;
       const original = definition.execute;
       const wrapper: Definition["execute"] = function (this: unknown, ...args) {
-        if (context.getStore()?.owner !== owner)
-          return Reflect.apply(original, this, args);
-        // Pi's native shell always constructs an env object. Its public factory
-        // hook is the authoritative place to replace the inherited startup context.
-        const spawnHook = (spawn: {
-          command: string;
-          cwd: string;
-          env: NodeJS.ProcessEnv;
-        }) => {
-          const env = { ...spawn.env },
-            value = parent();
-          if (value === undefined) delete env[PARENT_ENV];
-          else env[PARENT_ENV] = value;
-          return { ...spawn, env };
-        };
-        const settings = session.settingsManager.getSettings();
-        const native =
-          name === "bash"
-            ? createBashToolDefinition(session.sessionManager.getCwd(), {
-                shellPath: settings.shellPath,
-                commandPrefix: settings.shellCommandPrefix,
-                spawnHook,
-              })
-            : createPowerShellToolDefinition(session.sessionManager.getCwd(), {
-                spawnHook,
-              });
-        return Reflect.apply(native.execute, this, args);
+        const invoke = () => Reflect.apply(original, this, args);
+        return context.getStore()?.owner === owner
+          ? shellSpawn.run({ pending: true }, invoke)
+          : invoke();
       };
       definition.execute = wrapper;
       owner.shells.set(definition, { original, wrapper });
@@ -145,8 +227,10 @@ function install(): Runtime {
     this: childProcess.ChildProcess,
     options,
   ) {
-    if (!context.getStore() || options.env != null)
+    const nativeShell = shellSpawn.getStore();
+    if (!context.getStore() || (options.env != null && !nativeShell?.pending))
       return Reflect.apply(spawn, this, [options]);
+    if (nativeShell) nativeShell.pending = false;
     const value = parent();
     const envPairs = options.envPairs.filter(
       (entry) => !entry.startsWith(`${PARENT_ENV}=`),
@@ -193,7 +277,8 @@ function install(): Runtime {
 /** Incoming process context is configuration; live authority stays invocation-local. */
 export function bindChildHandoff() {
   const owner: Owner = { shells: new Map() };
-  let runtime: Runtime | undefined;
+  let runtime: Runtime | undefined = install();
+  runtime.owners.add(owner);
   return {
     bind(manager: object) {
       runtime = install();
