@@ -8,8 +8,7 @@ export interface Config {
   /** Derived from connection provenance, never a workspace setting. */
   autoStartLocal: boolean;
   connectionKind: "local" | "remote" | "override";
-  authentication: "agent-token" | "session" | "expired" | "none";
-  authHeaders: Record<string, string>;
+  authentication: "agent-token" | "sdk-managed";
 }
 
 export class ConfigError extends Error {}
@@ -29,7 +28,7 @@ async function readJson(
 }
 
 function origin(value: unknown): string {
-  if (typeof value !== "string")
+  if (typeof value !== "string" || /[\s\\]/u.test(value))
     throw new ConfigError("Sovara server URL must be an origin");
   let url: URL;
   try {
@@ -78,14 +77,13 @@ export async function loadConfig(
     join(home, ".sovara", "app_connection.json"),
   );
   let selected = "http://127.0.0.1:5960";
-  let trustedOrigin: string | undefined;
   let localConnection = true;
   if (connection) {
     if (connection.version === 1 && connection.mode === "remote") {
-      selected = trustedOrigin = origin(connection.remote_server_url);
+      selected = origin(connection.remote_server_url);
       localConnection = false;
     } else if (connection.version === 1 && connection.mode === "local") {
-      trustedOrigin = selected;
+      localConnection = true;
     } else if (
       connection.version === 2 &&
       Array.isArray(connection.connections)
@@ -102,42 +100,34 @@ export async function loadConfig(
         throw new ConfigError("Invalid Sovara connection");
       localConnection = entry.kind === "local";
       selected = localConnection ? selected : active;
-      trustedOrigin = selected;
     } else throw new ConfigError("Unsupported Sovara connection configuration");
   }
+  const port = env.SOVARA_EXEC_SERVER_PORT;
+  if (
+    port !== undefined &&
+    (!/^[+]?\d+$/.test(port.trim()) || Number(port) < 1 || Number(port) > 65535)
+  )
+    throw new ConfigError("Invalid Sovara exec server port");
   const execUrl = origin(
-    env.SOVARA_EXEC_SERVER_URL ?? global.execUrl ?? selected,
+    env.SOVARA_EXEC_SERVER_URL ??
+      global.execUrl ??
+      (port !== undefined ? `http://127.0.0.1:${Number(port)}` : selected),
   );
-  const authHeaders: Record<string, string> = {};
-  let authentication: Config["authentication"] = "none";
-  if (env.SOVARA_AGENT_TOKEN?.trim()) {
-    authHeaders["x-sovara-agent-token"] = env.SOVARA_AGENT_TOKEN.trim();
-    authentication = "agent-token";
-  } else if (execUrl === trustedOrigin) {
-    const session = await readJson(join(home, ".sovara", "app_session.json"));
-    if (
-      session?.version === 1 &&
-      typeof session.session_token === "string" &&
-      typeof session.expires_at === "string"
-    ) {
-      if (Date.parse(session.expires_at) > Date.now()) {
-        authHeaders["x-sovara-platform-session"] = session.session_token;
-        authentication = "session";
-      } else authentication = "expired";
-    }
-  }
   const override =
-    env.SOVARA_EXEC_SERVER_URL !== undefined || global.execUrl !== undefined;
+    env.SOVARA_EXEC_SERVER_URL !== undefined ||
+    port !== undefined ||
+    global.execUrl !== undefined;
   return {
     connectionKind: override
       ? "override"
       : localConnection
         ? "local"
         : "remote",
-    authentication,
+    authentication: env.SOVARA_AGENT_TOKEN?.trim()
+      ? "agent-token"
+      : "sdk-managed",
     projectName: projectName.trim(),
     execUrl,
-    authHeaders,
     autoStartLocal: localConnection && !override,
   };
 }

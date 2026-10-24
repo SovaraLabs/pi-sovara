@@ -2,47 +2,43 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type { ParentContext } from "@sovara/sdk";
 import { loadConfig, type Config } from "./config.ts";
-import { SovaraClient, type Scope } from "./client.ts";
-import { Recorder, withUsage } from "./recorder.ts";
+import { Recorder, createClient } from "./recorder.ts";
+import { bindProviders } from "./provider.ts";
 import { connectionDetails, explainError } from "./diagnostics.ts";
 
 const PARENT_ENV = "SOVARA_PI_PARENT";
 const CONFIG_ENTRY = "sovara-config-v1";
-
-interface Parent {
-  url: string;
-  projectName: string;
-  scope: Scope;
-}
-function inheritedParent(): Parent | undefined {
-  const raw = process.env[PARENT_ENV];
-  if (!raw) return;
-  const value = JSON.parse(raw) as Parent;
-  if (
-    !value.url ||
-    !value.projectName ||
-    !value.scope?.recording?.run_write_token ||
-    !value.scope.turnId
-  ) {
-    throw new Error("Invalid Sovara parent context");
-  }
-  return value;
-}
+const CHILD_ENTRY = "sovara-child-v1";
 
 export default function sovara(pi: ExtensionAPI): void {
+  const providers = bindProviders(pi);
+  const originalParent = process.env[PARENT_ENV];
+  let publishedParent: string | undefined;
   let recorder: Recorder | undefined;
   let selectedConfig: Config | undefined;
   let lastError: string | undefined;
   let operationFailed = false;
-  let lastRetrievalWarning: string | undefined;
-  let summaryCapture:
-    | { started: number; payload?: unknown; signal?: AbortSignal }
+  const signals = new Set<AbortSignal>();
+  let summary:
+    | {
+        recorder: Recorder;
+        signal: AbortSignal;
+        timer?: NodeJS.Timeout;
+        abort: () => void;
+      }
     | undefined;
-  const originalParent = process.env[PARENT_ENV];
+  let operations = Promise.resolve();
   const restoreParent = () => {
-    if (originalParent === undefined) delete process.env[PARENT_ENV];
-    else process.env[PARENT_ENV] = originalParent;
+    if (
+      publishedParent !== undefined &&
+      process.env[PARENT_ENV] === publishedParent
+    ) {
+      if (originalParent === undefined) delete process.env[PARENT_ENV];
+      else process.env[PARENT_ENV] = originalParent;
+    }
+    publishedParent = undefined;
   };
   const status = (ctx: ExtensionContext, text: string) => {
     if (ctx.hasUI) ctx.ui.setStatus("sovara", `sovara: ${text}`);
@@ -56,50 +52,66 @@ export default function sovara(pi: ExtensionAPI): void {
     operationFailed = true;
     status(ctx, "operation failed — /sovara for details");
   };
-  const guarded = async (ctx: ExtensionContext, work: () => Promise<void>) => {
-    const active = recorder;
-    try {
-      await work();
-    } catch (error) {
-      report(ctx, error);
-    } finally {
-      for (const current of new Set([active, recorder]))
-        for (const error of current?.takeExportErrors() ?? [])
-          report(ctx, error);
-    }
+  const guarded = (ctx: ExtensionContext, work: () => Promise<void>) => {
+    operations = operations.then(async () => {
+      const active = recorder,
+        activeSummary = summary?.recorder;
+      try {
+        await work();
+      } catch (error) {
+        report(ctx, error);
+      } finally {
+        for (const value of new Set([
+          active,
+          recorder,
+          activeSummary,
+          summary?.recorder,
+        ]))
+          for (const error of value?.takeExportErrors() ?? [])
+            report(ctx, error);
+      }
+    });
+    return operations;
   };
-  async function cleanup(): Promise<void> {
+  async function closeSummary(cancelled = false): Promise<void> {
+    const active = summary;
+    summary = undefined;
+    if (!active) return;
+    clearInterval(active.timer);
+    active.signal.removeEventListener("abort", active.abort);
+    providers.unbind(active.signal);
+    await active.recorder.close(cancelled);
+  }
+  async function closeTurn(cancelled = false): Promise<void> {
     restoreParent();
-    const previous = recorder;
+    for (const signal of signals) providers.unbind(signal);
+    signals.clear();
+    await recorder?.close(cancelled);
+  }
+  async function cleanup(): Promise<void> {
+    await closeSummary(true);
+    await closeTurn(true);
     recorder = undefined;
-    summaryCapture = undefined;
-    await previous?.close("SessionClosed");
+    providers.dispose();
   }
 
   pi.registerCommand("sovara", {
     description: "Show Sovara project and recording status",
     handler: async (_args, ctx) => {
       const lines = selectedConfig
-        ? connectionDetails(selectedConfig, !!recorder)
+        ? connectionDetails(selectedConfig, !!recorder?.recording)
         : ["Sovara configuration could not be loaded."];
-      lines.push(
-        `Recording: ${recorder ? (recorder.scope ? "active" : "idle") : "unavailable"}`,
-      );
-      if (recorder?.retrievalWarning)
-        lines.push(`Lessons: ${recorder.retrievalWarning}`);
       if (lastError) lines.push(`Last error: ${lastError}`);
       ctx.ui.notify(lines.join("\n"), lastError ? "warning" : "info");
     },
   });
 
-  pi.on("session_start", async (event, ctx) => {
-    let initialized = false;
-    await guarded(ctx, async () => {
+  pi.on("session_start", (_event, ctx) =>
+    guarded(ctx, async () => {
       await cleanup();
       operationFailed = false;
       selectedConfig = undefined;
       lastError = undefined;
-      lastRetrievalWarning = undefined;
       const config = await loadConfig(
         ctx.cwd,
         undefined,
@@ -107,8 +119,6 @@ export default function sovara(pi: ExtensionAPI): void {
         ctx.isProjectTrusted(),
       );
       selectedConfig = config;
-      const parent = inheritedParent();
-      // A resumed session keeps its original project binding.
       const entries = ctx.sessionManager.getEntries();
       const saved = [...entries]
         .reverse()
@@ -118,210 +128,184 @@ export default function sovara(pi: ExtensionAPI): void {
         );
       if (
         saved?.type === "custom" &&
-        event.reason !== "fork" &&
-        event.reason !== "new"
+        _event.reason !== "fork" &&
+        _event.reason !== "new"
       ) {
-        const data = saved.data as {
-          projectName?: unknown;
-        };
+        const data = saved.data as { projectName?: unknown };
         if (typeof data?.projectName !== "string" || !data.projectName)
           throw new Error("Invalid session binding");
         config.projectName = data.projectName;
       }
+      // The SDK validates/copies the complete secret-bearing context before registration.
+      const parent = originalParent
+        ? (JSON.parse(originalParent) as ParentContext)
+        : undefined;
       if (parent) {
-        if (parent.url !== config.execUrl)
-          throw new Error("Subagent Sovara server differs from parent");
+        if (
+          parent.url !== config.execUrl ||
+          typeof parent.projectName !== "string"
+        )
+          throw new Error("Invalid parent binding");
         config.projectName = parent.projectName;
       }
-      const client = new SovaraClient(config);
-      if (parent) client.protect(parent.scope.recording.run_write_token);
-      await client.connect();
-      const header = ctx.sessionManager.getHeader();
+      const child = [...entries]
+        .reverse()
+        .find(
+          (entry) =>
+            entry.type === "custom" && entry.customType === CHILD_ENTRY,
+        );
+      const data =
+        child?.type === "custom"
+          ? (child.data as {
+              traceId?: string;
+              parentTraceId?: string;
+              url?: string;
+              projectName?: string;
+              sessionId?: string;
+            })
+          : undefined;
+      const sessionId = ctx.sessionManager.getSessionId();
+      const childTraceId =
+        parent &&
+        data &&
+        data.parentTraceId === parent.traceId &&
+        data.url === config.execUrl &&
+        data.projectName === config.projectName &&
+        data.sessionId === sessionId
+          ? data.traceId
+          : undefined;
       recorder = new Recorder(
-        client,
+        createClient(config),
         config,
-        ctx.sessionManager.getSessionId(),
-        ctx.cwd,
-        parent?.scope,
-        header?.parentSession,
+        sessionId,
+        parent,
+        childTraceId,
+        (traceId) =>
+          pi.appendEntry(CHILD_ENTRY, {
+            traceId,
+            parentTraceId: parent!.traceId,
+            url: config.execUrl,
+            projectName: config.projectName,
+            sessionId,
+          }),
+        ctx.sessionManager.getHeader()?.parentSession,
       );
-      if (!saved || event.reason === "fork" || event.reason === "new") {
-        pi.appendEntry(CONFIG_ENTRY, {
-          projectName: config.projectName,
-        });
-      }
-      status(ctx, config.projectName);
-      initialized = true;
-    });
-    if (!initialized) await guarded(ctx, cleanup);
-  });
+      if (!saved || _event.reason === "fork" || _event.reason === "new")
+        pi.appendEntry(CONFIG_ENTRY, { projectName: config.projectName });
+      providers.install(ctx);
+      status(ctx, `${config.projectName} · ready`);
+    }),
+  );
 
-  pi.on("before_agent_start", async (event, ctx) => {
-    if (!recorder) return;
-    summaryCapture = undefined;
-    restoreParent();
-    await guarded(ctx, async () => {
+  pi.on("before_agent_start", (event, ctx) =>
+    guarded(ctx, async () => {
+      if (!recorder) return;
+      await closeSummary(true);
+      await closeTurn(true);
       operationFailed = false;
       lastError = undefined;
-      await recorder!.start(
+      providers.install(ctx);
+      await recorder.start(
         event.messageType === "user" ? event.prompt : event.message.content,
         ctx.signal,
       );
-      process.env[PARENT_ENV] = JSON.stringify({
-        url: recorder!.config.execUrl,
-        projectName: recorder!.config.projectName,
-        scope: recorder!.scope!,
-      } satisfies Parent);
-      status(ctx, `${recorder!.config.projectName} · recording`);
-    });
-  });
-
-  pi.on("context_with_system", async (event, ctx) => {
-    const active = recorder;
-    if (!active?.scope?.turnId || summaryCapture) return;
-    let messages = event.messages;
-    await guarded(ctx, async () => {
-      messages = await active.prepareContext(messages, ctx.signal);
-      const warning = active.retrievalWarning;
-      if (warning && warning !== lastRetrievalWarning) {
-        if (ctx.hasUI) ctx.ui.notify(`Sovara: ${warning}`, "warning");
-        else console.error(`[sovara-pi] ${warning}`);
-      }
-      lastRetrievalWarning = warning;
-    });
-    return { messages };
-  });
-
-  pi.on("before_provider_request", async (event, ctx) => {
-    if (summaryCapture) {
-      summaryCapture.payload = structuredClone(event.payload);
-      return;
+      publishedParent = JSON.stringify(recorder.turn!.exportParentContext());
+      process.env[PARENT_ENV] = publishedParent;
+      status(ctx, `${recorder.config.projectName} · recording`);
+    }),
+  );
+  pi.on("context_with_system", (_event, ctx) => {
+    if (!recorder?.turn || summary) return;
+    providers.install(ctx);
+    recorder.noteSignal(ctx.signal);
+    if (ctx.signal) {
+      signals.add(ctx.signal);
+      providers.bind(ctx.signal, recorder.turn);
     }
-    await guarded(ctx, async () => {
-      await recorder?.beginGeneration(
-        structuredClone(event.payload),
-        ctx.model,
-        ctx.signal,
-      );
-    });
+    // Leave Pi's transcript untouched. SDK HTTP preparation injects temporary lessons.
   });
-  pi.on("message_update", (event) => {
-    if (
-      ["text_delta", "thinking_delta", "toolcall_delta"].includes(
-        event.assistantMessageEvent.type,
-      )
-    )
-      recorder?.noteFirstToken();
+  pi.on("message_end", (event) => {
+    if (event.message.role === "assistant") recorder?.noteOutput(event.message);
   });
-  pi.on("message_end", async (event, ctx) => {
-    const message = event.message;
-    if (message.role === "assistant")
-      await guarded(ctx, async () => {
-        await recorder?.endGeneration(message, ctx.signal);
-      });
-  });
-  pi.on("tool_execution_start", async (event, ctx) => {
-    await guarded(ctx, async () => {
+  pi.on("tool_execution_start", (event, ctx) =>
+    guarded(ctx, async () => {
       await recorder?.beginTool(
         event.toolCallId,
         event.toolName,
-        structuredClone(event.args),
+        event.args,
         event.parentToolCallId,
-        ctx.signal,
       );
-    });
-  });
-  pi.on("tool_execution_end", async (event, ctx) => {
-    await guarded(ctx, async () => {
-      await recorder?.endTool(
-        event.toolCallId,
-        structuredClone(event.result),
-        event.isError,
-        ctx.signal,
-      );
-    });
-  });
-  pi.on("agent_settled", async (_event, ctx) => {
-    restoreParent();
-    await guarded(ctx, async () => {
-      await recorder?.close();
-    });
-    if (recorder)
-      status(
-        ctx,
-        operationFailed
-          ? "export incomplete"
-          : recorder.retrievalWarning
-            ? "turn export acknowledged · lesson retrieval warning"
-            : "turn export acknowledged",
-      );
-  });
-  pi.on("session_shutdown", async (_event, ctx) => {
-    await guarded(ctx, cleanup);
-  });
+    }),
+  );
+  pi.on("tool_execution_end", (event, ctx) =>
+    guarded(ctx, async () => {
+      await recorder?.endTool(event.toolCallId, event.result, event.isError);
+    }),
+  );
+  pi.on("agent_settled", (event, ctx) =>
+    guarded(ctx, async () => {
+      await closeTurn(event.aborted);
+      if (recorder)
+        status(
+          ctx,
+          operationFailed ? "export incomplete" : "turn export acknowledged",
+        );
+    }),
+  );
+  pi.on("session_shutdown", (_event, ctx) => guarded(ctx, cleanup));
 
-  async function summary(
+  const startSummary = (
     name: string,
-    entry: unknown,
+    signal: AbortSignal,
     ctx: ExtensionContext,
-  ): Promise<void> {
-    const captured = summaryCapture;
-    summaryCapture = undefined;
-    if (!entry || !recorder) return;
-    const active = recorder;
-    const ownsTurn = !active.scope;
-    const signal = captured?.signal?.aborted
-      ? AbortSignal.timeout(1000)
-      : (ctx.signal ?? AbortSignal.timeout(10000));
-    await guarded(ctx, async () => {
+  ) =>
+    guarded(ctx, async () => {
+      await closeSummary(true);
+      if (!recorder) return;
+      const capture = recorder.summary();
+      const abort = () => {
+        void guarded(ctx, () => closeSummary(true));
+      };
+      summary = { recorder: capture, signal, abort };
       try {
-        if (ownsTurn) await active.start(name, signal);
-        const step = await active.client.prepare(
-          active.scope!,
-          "pi.summary",
-          "llm",
-          {
-            body: { model: ctx.model?.id },
-            summary_kind: name,
-            capture: "pi-summary-event",
-            provider_payload: captured?.payload,
-            input_unavailable: captured?.payload === undefined,
-          },
-          signal,
-        );
-        if (captured) step.started = captured.started;
-        await active.client.finish(
-          step,
-          withUsage(entry),
-          (entry as { status?: string }).status === "error"
-            ? "SummaryFailed"
-            : undefined,
-          signal,
-        );
-      } finally {
-        if (ownsTurn) await active.close();
+        await capture.start(name, signal);
+      } catch (error) {
+        await closeSummary(true);
+        throw error;
       }
+      providers.install(ctx);
+      providers.bind(signal, capture.turn!, (message) => {
+        if (message) capture.noteOutput(message);
+        else capture.noteFailure();
+      });
+      signal.addEventListener("abort", abort, { once: true });
+      // Pi's public idle state includes branch-summary/compaction controllers.
+      // Tree-summary failures have no terminal event; clean up after that controller clears.
+      summary.timer = setInterval(() => {
+        if (summary?.recorder !== capture) return;
+        if (ctx.isIdle())
+          void guarded(ctx, async () => {
+            if (summary?.recorder !== capture) return;
+            capture.noteFailure();
+            await closeSummary(signal.aborted);
+          });
+      }, 50);
+      summary.timer.unref();
     });
-  }
-  pi.on("session_before_compact", (event) => {
-    summaryCapture = { started: Date.now(), signal: event.signal };
-  });
-  pi.on("session_before_tree", (event) => {
-    summaryCapture = event.preparation.userWantsSummary
-      ? { started: Date.now(), signal: event.signal }
-      : undefined;
-  });
-  pi.on("session_compact_failed", async (event, ctx) => {
-    await summary(
-      "Compaction failed",
-      { aborted: event.aborted, status: "error" },
-      ctx,
-    );
-  });
-  pi.on("session_compact", async (event, ctx) => {
-    await summary("Compaction", event.compactionEntry, ctx);
-  });
-  pi.on("session_tree", async (event, ctx) => {
-    await summary("Branch summary", event.summaryEntry, ctx);
-  });
+  pi.on("session_before_compact", (event, ctx) =>
+    startSummary("Compaction", event.signal, ctx),
+  );
+  pi.on("session_before_tree", (event, ctx) =>
+    event.preparation.userWantsSummary
+      ? startSummary("Branch summary", event.signal, ctx)
+      : undefined,
+  );
+  pi.on("session_compact_failed", (event, ctx) =>
+    guarded(ctx, async () => {
+      summary?.recorder.noteFailure();
+      await closeSummary(event.aborted);
+    }),
+  );
+  pi.on("session_compact", (_event, ctx) => guarded(ctx, () => closeSummary()));
+  pi.on("session_tree", (_event, ctx) => guarded(ctx, () => closeSummary()));
 }

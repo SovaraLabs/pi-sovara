@@ -1,5 +1,5 @@
 const sensitiveKey =
-  /^(authorization|api[_-]?key|access_token|refresh_token|session_token|run_write_token|secret_key|x-sovara-.*token)$/i;
+  /^(authorization|api[_-]?key|access_token|refresh_token|session_token|run_write_token|trace_write_token|traceWriteToken|secret_key|x-sovara-.*token)$/i;
 
 /** Mask known integration credentials and credential fields, not arbitrary user content. */
 export function redact(value: unknown, secrets: string[]): unknown {

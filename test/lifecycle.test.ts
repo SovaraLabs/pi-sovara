@@ -5,53 +5,54 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../src/index.ts";
+import { createClient } from "../src/recorder.ts";
 import { fixtureServer } from "./helpers.ts";
 
-async function harness(parent?: string) {
-  const backend = await fixtureServer();
-  const cwd = await mkdtemp(join(tmpdir(), "pi-lifecycle-"));
+async function harness(child = false) {
+  const backend = await fixtureServer(),
+    cwd = await mkdtemp(join(tmpdir(), "pi-lifecycle-"));
   await mkdir(join(cwd, ".pi"));
   const previous = {
     SOVARA_EXEC_SERVER_URL: process.env.SOVARA_EXEC_SERVER_URL,
     PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
     SOVARA_PI_PARENT: process.env.SOVARA_PI_PARENT,
   };
-  process.env.SOVARA_EXEC_SERVER_URL = backend.config.execUrl;
+  process.env.SOVARA_EXEC_SERVER_URL = backend.url;
   process.env.PI_CODING_AGENT_DIR = join(cwd, "agent");
-  if (parent)
-    process.env.SOVARA_PI_PARENT = parent.replace(
-      "BACKEND_URL",
-      backend.config.execUrl,
-    );
-  else delete process.env.SOVARA_PI_PARENT;
-  const handlers = new Map<string, (event: any, ctx: any) => any>();
-  let entries: any[] = [];
-  let sessionId = "session-1";
-  const statuses: string[] = [];
-  const notifications: string[] = [];
-  const commands = new Map<string, any>();
+  delete process.env.SOVARA_PI_PARENT;
+  const parent = child
+    ? await createClient(backend.config).startRecording("parent", {
+        captureLogs: false,
+      })
+    : undefined;
+  const originalParent = parent
+    ? JSON.stringify(parent.exportParentContext())
+    : undefined;
+  if (originalParent) process.env.SOVARA_PI_PARENT = originalParent;
+  const handlers = new Map<string, (event: any, ctx: any) => any>(),
+    commands = new Map<string, any>();
+  let entries: any[] = [],
+    sessionId = "session-1";
+  const notifications: string[] = [],
+    statuses: string[] = [];
   const api = {
-    on(name: string, callback: any) {
-      handlers.set(name, callback);
-    },
-    registerCommand(name: string, command: any) {
-      commands.set(name, command);
-    },
-    appendEntry(customType: string, data: unknown) {
-      entries.push({ type: "custom", customType, data });
-    },
+    on: (name: string, callback: any) => handlers.set(name, callback),
+    registerCommand: (name: string, command: any) =>
+      commands.set(name, command),
+    appendEntry: (customType: string, data: unknown) =>
+      entries.push({ type: "custom", customType, data }),
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd,
     hasUI: true,
     isProjectTrusted: () => true,
-    signal: undefined as AbortSignal | undefined,
-    model: { id: "test", provider: "test" },
+    isIdle: () => false,
+    signal: new AbortController().signal as AbortSignal | undefined,
+    model: undefined,
+    modelRegistry: { getAll: () => [] },
     ui: {
       setStatus: (_key: string, value: string) => statuses.push(value),
-      notify(message: string) {
-        notifications.push(message);
-      },
+      notify: (value: string) => notifications.push(value),
     },
     sessionManager: {
       getEntries: () => entries,
@@ -60,373 +61,194 @@ async function harness(parent?: string) {
     },
   };
   extension(api);
-  const emit = (name: string, event: Record<string, unknown> = {}) =>
+  const emit = (name: string, event: any = {}) =>
     handlers.get(name)?.({ type: name, ...event }, ctx);
   return {
     backend,
     cwd,
-    statuses,
-    notifications,
-    command: (name: string) => commands.get(name).handler("", ctx),
-    emit,
     ctx,
-    async config(projectName: string) {
-      await writeFile(
-        join(cwd, ".pi", "sovara.json"),
-        JSON.stringify({ projectName }),
-      );
-    },
+    notifications,
+    statuses,
+    parent,
+    originalParent,
+    entries: () => entries,
+    emit,
+    config: (projectName: string) =>
+      writeFile(join(cwd, ".pi/sovara.json"), JSON.stringify({ projectName })),
     newSession() {
-      entries = [];
       sessionId = "session-2";
+      entries = [];
     },
-    async start() {
-      await emit("session_start", { reason: "startup" });
-    },
-    async prompt() {
-      await emit("before_agent_start", {
+    start: () => emit("session_start", { reason: "startup" }),
+    prompt: () =>
+      emit("before_agent_start", {
         messageType: "user",
-        prompt: "task",
-        systemPromptOptions: { sections: {} },
-      });
-    },
+        prompt: "controlled task",
+      }),
+    command: () => commands.get("sovara").handler("", ctx),
     async close() {
       await emit("session_shutdown", { reason: "quit" });
-      for (const [key, value] of Object.entries(previous)) {
+      await parent?.finish();
+      for (const [key, value] of Object.entries(previous))
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
-      }
       await backend.close();
       await rm(cwd, { recursive: true, force: true });
     },
   };
 }
 
-test("project changes apply to new sessions while resume keeps its binding", async () => {
+test("project resume/new-session binding and native context immutability", async () => {
   const h = await harness();
   try {
-    await h.config("original");
+    await h.config("first");
     await h.start();
-    await h.config("changed");
-    await h.emit("session_shutdown", { reason: "reload" });
+    await h.prompt();
+    const messages = [{ role: "user", content: "unchanged" }];
+    assert.equal(await h.emit("context_with_system", { messages }), undefined);
+    assert.deepEqual(messages, [{ role: "user", content: "unchanged" }]);
+    await h.emit("agent_settled", { aborted: false });
+    await h.config("second");
     await h.emit("session_start", { reason: "resume" });
-    assert.match(h.statuses.at(-1)!, /original/);
-    await h.emit("session_shutdown", { reason: "new" });
+    await h.prompt();
+    await h.emit("agent_settled", { aborted: false });
     h.newSession();
     await h.emit("session_start", { reason: "new" });
-    assert.match(h.statuses.at(-1)!, /changed/);
+    await h.prompt();
+    await h.emit("agent_settled", { aborted: false });
+    assert.deepEqual(
+      h.backend.calls
+        .filter((c) => c.path === "/runner/register")
+        .map((c) => c.body.project_name),
+      ["first", "first", "second"],
+    );
   } finally {
     await h.close();
   }
 });
 
-test("child processes inherit project and restore parent credentials", async () => {
-  const parent = JSON.stringify({
-    url: "BACKEND_URL",
-    projectName: "parent-project",
-    scope: {
-      recording: {
-        run_id: "parent-run",
-        recording_id: "parent-recording",
-        run_write_token: "parent-secret",
-        project_id: "parent-project-id",
-      },
-      turnId: "parent-turn",
-    },
-  });
-  const h = await harness(parent);
-  const inherited = process.env.SOVARA_PI_PARENT;
+test("child handoff preserves durable trace through turns and stores no credentials", async () => {
+  const h = await harness(true);
   try {
-    await h.config("workspace");
     await h.start();
-    assert.match(h.statuses.at(-1)!, /parent-project/);
     await h.prompt();
-    const subrun = h.backend.calls.find((c) => c.path === "/runner/subrun")!;
-    assert.equal(subrun.body.parent_run_id, "parent-run");
-    assert.equal(subrun.body.turn_id, "parent-turn");
-    assert.equal(subrun.headers["x-sovara-run-token"], "parent-secret");
+    const first = JSON.parse(process.env.SOVARA_PI_PARENT!);
+    assert.notEqual(first.traceId, h.parent!.traceId);
+    await h.emit("agent_settled", { aborted: false });
+    assert.equal(process.env.SOVARA_PI_PARENT, h.originalParent);
+    await h.prompt();
+    const second = JSON.parse(process.env.SOVARA_PI_PARENT!);
+    assert.equal(second.traceId, first.traceId);
+    assert.notEqual(second.recordingId, first.recordingId);
+    await h.emit("agent_settled", { aborted: false });
     assert.equal(
-      JSON.parse(process.env.SOVARA_PI_PARENT!).projectName,
-      "parent-project",
+      h.backend.calls.filter((c) => c.path === "/runner/subtrace").length,
+      1,
     );
-    await h.emit("agent_settled");
-    assert.equal(process.env.SOVARA_PI_PARENT, inherited);
+    assert.equal(
+      h.backend.calls.filter((c) => c.path === "/runner/subtrace/attach")
+        .length,
+      1,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(h.entries()),
+      /traceWriteToken|CONTROLLED_TOKEN/,
+    );
+    assert.equal(h.parent!.state, "active");
+  } finally {
+    await h.close();
+  }
+});
+
+test("tools and MCP have one owner, preserve returned errors, and cancel missing ends", async () => {
+  const h = await harness();
+  try {
+    await h.start();
+    await h.prompt();
+    await h.emit("tool_execution_start", {
+      toolCallId: "a",
+      toolName: "mcp__fixture__lookup",
+      args: { q: 1 },
+      parentToolCallId: "parent-tool",
+    });
+    await h.emit("tool_execution_end", {
+      toolCallId: "a",
+      result: { isError: true, text: "controlled failure" },
+      isError: true,
+    });
+    await h.emit("tool_execution_start", {
+      toolCallId: "b",
+      toolName: "read",
+      args: { path: "file" },
+    });
+    await h.emit("agent_settled", { aborted: true });
+    const prepares = h.backend.calls.filter((c) => c.path.endsWith("/prepare")),
+      finals = h.backend.calls.filter((c) => c.path.endsWith("/finalize"));
+    assert.equal(prepares.length, 2);
+    assert.equal(finals.length, 2);
+    assert.equal(prepares[0].body.api_type, "sovara.trace");
+    assert.equal(prepares[0].body.step_kind, "mcp");
+    assert.match(prepares[0].body.input_json, /parent-tool/);
+    assert.match(finals[0].body.output_json, /controlled failure/);
+    assert.equal(finals[0].body.status, "error");
+    assert.match(finals[1].body.error_json, /AbortError/);
+    assert.equal(
+      h.backend.calls.filter((c) => c.path === "/runner/deregister").length,
+      1,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("SDK preparation/export failure leaves Pi running and diagnostics safe", async () => {
+  const h = await harness();
+  try {
+    await h.start();
+    await h.prompt();
+    h.backend.reject("/internal/runner/llm/prepare");
+    await h.emit("tool_execution_start", {
+      toolCallId: "failed",
+      toolName: "read",
+      args: {},
+    });
+    await h.emit("agent_settled", { aborted: false });
+    await h.command();
+    assert(h.notifications.length > 0);
+    assert.doesNotMatch(h.notifications.join(), /PRIVATE ERROR PAYLOAD/);
+    assert(h.statuses.some((s) => s.includes("incomplete")));
+  } finally {
+    await h.close();
+  }
+});
+
+test("summary has an independent turn on an active recording and never fabricates a model step", async () => {
+  const h = await harness();
+  try {
+    await h.start();
+    await h.prompt();
+    const signal = new AbortController().signal;
+    await h.emit("session_before_compact", { signal });
+    await h.emit("session_compact", {
+      compactionEntry: { summary: "from another extension" },
+    });
     assert.equal(
       h.backend.calls.filter((c) => c.path === "/runner/register").length,
+      1,
+    );
+    assert.equal(
+      h.backend.calls.filter((c) => c.path === "/runner/turns").length,
+      2,
+    );
+    assert.equal(
+      h.backend.calls.filter((c) => c.path.endsWith("/prepare")).length,
       0,
     );
-  } finally {
-    await h.close();
-  }
-});
-
-test("context retains earlier lessons while appending newly retrieved lessons", async () => {
-  const h = await harness();
-  try {
-    await h.start();
-    await h.prompt();
-    const messages = [
-      { role: "user", content: "task", timestamp: 1 },
-      {
-        role: "custom", customType: "sovara-lessons",
-        content: "Earlier guidance", display: false, timestamp: 2,
-      },
-      { role: "user", content: "continue", timestamp: 3 },
-    ];
-    const result = await h.emit("context_with_system", { messages });
-    assert.deepEqual(result.messages.slice(0, messages.length), messages);
-    assert.equal(result.messages.length, messages.length + 1);
-    assert.equal(result.messages.at(-1).customType, "sovara-lessons");
-    assert.equal(messages.length, 3);
-  } finally {
-    await h.close();
-  }
-});
-
-test("retrieval failure leaves context intact; export failure never reports success", async () => {
-  const h = await harness();
-  try {
-    await h.start();
-    await h.prompt();
-    h.backend.reject("/internal/lessons/retrieve");
-    const messages = [
-      { role: "system", content: "system" },
-      { role: "user", content: "task", timestamp: 1 },
-      {
-        role: "custom", customType: "sovara-lessons",
-        content: "Earlier guidance", display: false, timestamp: 2,
-      },
-    ];
-    const result = await h.emit("context_with_system", { messages });
-    assert.deepEqual(result.messages, messages);
-    h.backend.reject("");
-    await h.emit("before_provider_request", { payload: { model: "test" } });
-    h.backend.reject("/internal/runner/llm/finalize");
-    await h.emit("message_end", {
-      message: { role: "assistant", content: "answer", stopReason: "stop" },
-    });
-    await h.emit("agent_settled");
-    assert.equal(h.statuses.at(-1), "sovara: export incomplete");
-  } finally {
-    await h.close();
-  }
-});
-
-test("compaction produces one summary observation without a dangling model step", async () => {
-  const h = await harness();
-  try {
-    await h.start();
-    await h.prompt();
-    await h.emit("session_before_compact");
-    await h.emit("before_provider_request", {
-      payload: { messages: ["summary input"] },
-    });
-    await h.emit("session_compact", {
-      compactionEntry: { summary: "summary", usage: { input: 3, output: 2 } },
-    });
-    await h.emit("agent_settled");
-    const preparations = h.backend.calls.filter((c) =>
-      c.path.endsWith("/prepare"),
-    );
-    assert.equal(preparations.length, 1);
-    assert.equal(preparations[0].body.api_type, "pi.summary");
-    assert.deepEqual(
-      JSON.parse(preparations[0].body.input_json).raw.provider_payload,
-      { messages: ["summary input"] },
-    );
+    await h.emit("agent_settled", { aborted: false });
     assert.equal(
-      h.backend.calls.filter((c) => c.path.endsWith("/finalize")).length,
+      h.backend.calls.filter((c) => c.path === "/runner/deregister").length,
       1,
     );
-  } finally {
-    await h.close();
-  }
-});
-
-test("successful lessons are injected while trace failure remains visible", async () => {
-  const h = await harness();
-  try {
-    await h.start();
-    await h.prompt();
-    h.backend.reject("/internal/runner/llm/finalize");
-    const result = await h.emit("context_with_system", {
-      messages: [{ role: "user", content: "task", timestamp: 1 }],
-    });
-    assert.match(JSON.stringify(result.messages), /Use a deterministic clock/);
-    await h.emit("before_provider_request", { payload: {} });
-    await h.emit("message_end", {
-      message: { role: "assistant", content: "answer", stopReason: "stop" },
-    });
-    h.backend.reject("");
-    await h.emit("agent_settled");
-    assert.equal(h.statuses.at(-1), "sovara: export incomplete");
-  } finally {
-    await h.close();
-  }
-});
-
-for (const event of ["before_provider_request", "tool_execution_start"]) {
-  test(`Pi cancellation interrupts ${event}`, { timeout: 3000 }, async () => {
-    const h = await harness();
-    try {
-      const controller = new AbortController();
-      h.ctx.signal = controller.signal;
-      await h.start();
-      await h.prompt();
-      const reached = h.backend.blockNext("/internal/runner/llm/prepare");
-      const running = h.emit(event, {
-        payload: {},
-        toolCallId: "a",
-        toolName: "read",
-        args: {},
-      });
-      await reached;
-      controller.abort();
-      await running;
-      const before = h.backend.calls.length;
-      await h.emit(event, {
-        payload: {},
-        toolCallId: "b",
-        toolName: "read",
-        args: {},
-      });
-      assert.equal(
-        h.backend.calls.length,
-        before,
-        "already cancelled hooks must send no requests",
-      );
-    } finally {
-      await h.close();
-    }
-  });
-}
-
-test("failed standalone summary closes its turn and resets capture before normal retrieval", async () => {
-  const h = await harness();
-  try {
-    await h.start();
-    await h.emit("session_before_compact", { signal: AbortSignal.abort() });
-    await h.emit("before_provider_request", {
-      payload: { messages: ["summary input"] },
-    });
-    await h.emit("session_compact_failed", { aborted: true });
-    const summary = h.backend.calls.find((call) =>
-      call.path.endsWith("/finalize"),
-    )!;
-    assert.equal(summary.body.api_type, "pi.summary");
-    assert.equal(summary.body.status, "error");
-    assert.equal(h.backend.calls.at(-1)!.path, "/runner/deregister");
-    await h.prompt();
-    const result = await h.emit("context_with_system", {
-      messages: [{ role: "user", content: "task", timestamp: 1 }],
-    });
-    assert.match(JSON.stringify(result.messages), /Use a deterministic clock/);
-    assert.equal(
-      h.backend.calls.filter((call) => call.path.endsWith("/retrieve")).length,
-      1,
-    );
-  } finally {
-    await h.close();
-  }
-});
-
-test("skipped lesson retrieval preserves its warning in traces and Pi without repeated alerts", async () => {
-  const h = await harness();
-  const warning = "Lesson injection skipped. Missing: Fast Helper Model.";
-  try {
-    h.backend.retrieval({
-      lessons: [],
-      rendered_lessons_block: "",
-      retrieval_status: "complete",
-      warning_message: warning,
-    });
-    await h.start();
-    await h.prompt();
-    const messages = [{ role: "user", content: "Add Micron?", timestamp: 1 }];
-    for (let i = 0; i < 2; i++) {
-      const result = await h.emit("context_with_system", { messages });
-      assert.deepEqual(result.messages, messages);
-    }
-    assert.deepEqual(h.notifications, [`Sovara: ${warning}`]);
-    await h.emit("before_provider_request", { payload: {} });
-    await h.emit("agent_settled");
-    const retrieval = h.backend.calls.find((c) =>
-      c.path.endsWith("/finalize"),
-    )!;
-    assert.equal(retrieval.body.lesson_metadata.warning_message, warning);
-    assert.deepEqual(retrieval.body.lesson_metadata.applied_lessons, []);
-    assert.equal(retrieval.body.api_type, "pi.llm");
-    assert.match(h.statuses.at(-1)!, /lesson retrieval warning/);
-    await h.command("sovara");
-    assert.match(h.notifications.at(-1)!, /Lessons: .*Fast Helper Model/);
-
-    h.backend.retrieval({
-      lessons: [],
-      rendered_lessons_block: "",
-      retrieval_status: "complete",
-    });
-    await h.prompt();
-    await h.emit("context_with_system", { messages });
-    await h.emit("agent_settled");
-    assert.equal(h.statuses.at(-1), "sovara: turn export acknowledged");
-    await h.command("sovara");
-    assert.doesNotMatch(h.notifications.at(-1)!, /Fast Helper Model/);
-  } finally {
-    await h.close();
-  }
-});
-
-test("a failed retrieval response is recorded as failure while Pi continues", async () => {
-  const h = await harness();
-  try {
-    h.backend.retrieval({
-      lessons: [],
-      rendered_lessons_block: "",
-      retrieval_status: "failed",
-      error_message: "retrieval_unavailable",
-    });
-    await h.start();
-    await h.prompt();
-    const messages = [{ role: "user", content: "task", timestamp: 1 }];
-    assert.deepEqual(
-      (await h.emit("context_with_system", { messages })).messages,
-      messages,
-    );
-    assert.deepEqual(h.notifications, ["Sovara: retrieval_unavailable"]);
-    await h.emit("before_provider_request", { payload: {} });
-    await h.emit("message_end", {
-      message: { role: "assistant", content: "answer", stopReason: "stop" },
-    });
-    const retrieval = h.backend.calls.find((c) =>
-      c.path.endsWith("/finalize"),
-    )!;
-    assert.equal(retrieval.body.status, "success");
-    assert.equal(retrieval.body.lesson_metadata.retrieval_status, "failed");
-    assert.deepEqual(retrieval.body.lesson_metadata.applied_lessons, []);
-    await h.emit("agent_settled");
-    assert.match(h.statuses.at(-1)!, /lesson retrieval warning/);
-  } finally {
-    await h.close();
-  }
-});
-
-test("sovara command retains server and recovery instructions when connection fails", async () => {
-  const h = await harness();
-  try {
-    h.backend.versions([5]);
-    await h.start();
-    await h.command("sovara");
-    const text = h.notifications.at(-1)!;
-    assert.match(text, new RegExp(h.backend.config.execUrl));
-    assert.match(text, /Mode: explicit URL override/);
-    assert.match(text, /Connection: unavailable/);
-    assert.match(text, /compatible Sovara\/Pi extension versions/);
-    assert.doesNotMatch(text, /agent-secret|recording-secret/);
-    h.backend.versions([4]);
-    await h.emit("session_start", { reason: "reload" });
-    await h.command("sovara");
-    assert.match(h.notifications.at(-1)!, /Connection: server reachable/);
-    assert.doesNotMatch(h.notifications.at(-1)!, /Last error/);
   } finally {
     await h.close();
   }

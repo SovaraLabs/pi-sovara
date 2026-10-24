@@ -1,216 +1,217 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  ModelRuntime,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import {
-  createAssistantMessageEventStream,
-  type AssistantMessage,
-} from "@earendil-works/pi-ai";
-import { fixtureServer } from "./helpers.ts";
+import { completion } from "./helpers.ts";
+import { nativePi } from "./nativePi.ts";
+import { setTimeout as delay } from "node:timers/promises";
 
-test("real Pi loader retrieves and injects the conversation suffix", async () => {
-  const server = await fixtureServer();
-  const cwd = await mkdtemp(join(tmpdir(), "pi-agent-test-"));
-  const previous = process.env.SOVARA_EXEC_SERVER_URL;
-  const previousToken = process.env.SOVARA_AGENT_TOKEN;
-  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-  process.env.SOVARA_EXEC_SERVER_URL = server.config.execUrl;
-  process.env.SOVARA_AGENT_TOKEN = "test-token";
-  let session:
-    | Awaited<ReturnType<typeof createAgentSession>>["session"]
-    | undefined;
+test("real Pi native provider sends one prepared request per tool-loop call without retaining lessons", async () => {
+  const h = await nativePi();
+  let requests = 0;
+  h.server.provider((_body, response) =>
+    completion(
+      response,
+      "ACK",
+      requests++ === 0
+        ? { name: "read", arguments: { path: "input.txt" } }
+        : undefined,
+    ),
+  );
   try {
-    await mkdir(join(cwd, ".pi"));
-    await writeFile(
-      join(cwd, ".pi", "sovara.json"),
-      JSON.stringify({ projectName: "fixture" }),
-    );
-    await writeFile(join(cwd, "input.txt"), "Synthetic test evidence");
-    const agentDir = join(cwd, "agent");
-    process.env.PI_CODING_AGENT_DIR = agentDir;
-    const modelRuntime = await ModelRuntime.create({
-      authPath: join(agentDir, "auth.json"),
-      modelsPath: null,
-      modelsStorePath: join(agentDir, "models-cache.json"),
-      allowModelNetwork: false,
-      refreshOnCreate: false,
-    });
-    const inputs: unknown[] = [];
-    let index = 0;
-    modelRuntime.registerProvider("sovara-test", {
-      api: "sovara-test-api",
-      apiKey: "synthetic-key",
-      baseUrl: "http://127.0.0.1:1",
-      models: [
-        {
-          id: "synthetic",
-          name: "Synthetic",
-          reasoning: false,
-          input: ["text"],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 200000,
-          maxTokens: 4096,
-        },
-      ],
-      streamSimple(model, context, options) {
-        const stream = createAssistantMessageEventStream();
-        void (async () => {
-          try {
-            inputs.push(structuredClone(context));
-            await options?.onPayload?.(
-              { model: model.id, messages: context.messages },
-              model,
-            );
-            const current = index++;
-            const call:
-              | { name: string; arguments: Record<string, string> }
-              | undefined =
-              current === 0
-                ? { name: "read", arguments: { path: "input.txt" } }
-                : undefined;
-            const message: AssistantMessage = {
-              role: "assistant",
-              api: "sovara-test-api",
-              provider: "sovara-test",
-              model: "synthetic",
-              content: call
-                ? [{ type: "toolCall", id: `call-${current}`, ...call }]
-                : [
-                    {
-                      type: "text",
-                      text: "Finished with deterministic tests.",
-                    },
-                  ],
-              usage: {
-                input: 10,
-                output: 5,
-                cacheRead: 0,
-                cacheWrite: 0,
-                totalTokens: 15,
-                cost: {
-                  input: 0,
-                  output: 0,
-                  cacheRead: 0,
-                  cacheWrite: 0,
-                  total: 0,
-                },
-              },
-              stopReason: call ? "toolUse" : "stop",
-              timestamp: Date.now(),
-            };
-            stream.push({ type: "start", partial: message });
-            stream.push({
-              type: "done",
-              reason: message.stopReason as "stop" | "toolUse",
-              message,
-            });
-            stream.end();
-          } catch (error) {
-            stream.end();
-            throw error;
-          }
-        })();
-        return stream;
-      },
-    });
-    const settings = SettingsManager.inMemory({
-      defaultProjectTrust: "always",
-      compaction: { enabled: false },
-      cacheWarming: "off",
-    });
-    const loader = new DefaultResourceLoader({
-      cwd,
-      agentDir,
-      settingsManager: settings,
-      additionalExtensionPaths: [
-        resolve(process.env.SOVARA_TEST_PACKAGE_ROOT ?? ".", "src/index.ts"),
-      ],
-      noSkills: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      noContextFiles: true,
-      disabledBuiltinExtensions: ["llama.cpp", "codemode", "tool-search"],
-    });
-    await loader.reload();
-    assert.deepEqual(loader.getExtensions().errors, []);
-    const created = await createAgentSession({
-      cwd,
-      agentDir,
-      modelRuntime,
-      model: modelRuntime.getModel("sovara-test", "synthetic")!,
-      resourceLoader: loader,
-      settingsManager: settings,
-      sessionManager: SessionManager.inMemory(cwd),
-      tools: ["read"],
-    });
-    session = created.session;
-    const errors: unknown[] = [];
-    await session.bindExtensions({
-      mode: "print",
-      onError: (error) => {
-        errors.push(error);
-      },
-    });
-    await session.prompt("Inspect input.txt and explain how to test it.");
-    assert.deepEqual(errors, []);
-    assert.equal(inputs.length, 2);
-    const retrievals = server.calls.filter(
-      (c) => c.path === "/internal/lessons/retrieve",
-    );
-    assert.equal(retrievals.length, 2);
-    const finalized = server.calls.filter((c) => c.path.endsWith("/finalize"));
+    await h.session.prompt("Inspect input.txt and explain how to test it.");
+    assert.deepEqual(h.errors, []);
+    const calls = h.server.calls,
+      native = calls.filter((c) => c.path === "/v1/chat/completions"),
+      prepares = calls.filter((c) => c.path.endsWith("/prepare")),
+      finals = calls.filter((c) => c.path.endsWith("/finalize"));
+    assert.equal(native.length, 2);
     assert.equal(
-      finalized.filter((c) => c.body.step_kind === "llm").length,
-      inputs.length,
+      prepares.filter((c) => c.body.api_type === "httpx.Client.send").length,
+      2,
     );
+    assert.equal(finals.filter((c) => c.body.step_kind === "llm").length, 2);
+    assert.equal(finals.filter((c) => c.body.step_kind === "tool").length, 1);
     assert.equal(
-      finalized.filter((c) => c.body.step_kind === "tool").length,
-      1,
+      calls.filter((c) => c.path === "/internal/lessons/retrieve").length,
+      0,
     );
-    for (const call of finalized.filter((c) => c.body.step_kind === "llm")) {
-      assert.deepEqual(
-        call.body.lesson_metadata.applied_lessons.map((l: any) => l.lesson_id),
-        ["lesson-1"],
+    for (const request of native) {
+      assert.equal(
+        request.headers.authorization,
+        "Bearer CONTROLLED_PROVIDER_KEY",
       );
-      assert.match(
-        call.body.lesson_metadata.rendered_lessons_block,
-        /Use a deterministic clock/,
+      assert.equal(
+        request.body.messages.filter((m: any) =>
+          String(m.content).includes("TEMPORARY_LESSON_"),
+        ).length,
+        1,
       );
     }
-    assert.ok(server.calls.some((c) => c.path === "/runner/deregister"));
-    const secondQuery = JSON.parse(retrievals[1]!.body.raw_context);
-    assert.deepEqual(secondQuery.prefix, []);
-    assert.match(JSON.stringify(secondQuery.suffix), /Synthetic test evidence/);
     assert.doesNotMatch(
-      JSON.stringify(secondQuery.suffix),
-      /Inspect input.txt and explain/,
+      JSON.stringify(h.session.messages),
+      /TEMPORARY_LESSON_/,
     );
-    assert.ok(
-      inputs.every((input) =>
-        JSON.stringify(input).includes("Use a deterministic clock."),
+    assert.doesNotMatch(
+      JSON.stringify(prepares.map((c) => c.body)),
+      /CONTROLLED_PROVIDER_KEY|TEMPORARY_LESSON_/,
+    );
+    assert.equal(
+      calls.filter((c) => c.path === "/runner/deregister").length,
+      1,
+    );
+    assert(
+      finals.every((c) => c.body.status !== "error"),
+      JSON.stringify(
+        finals.map((c) => ({
+          api: c.body.api_type,
+          status: c.body.status,
+          error: c.body.error_json,
+        })),
       ),
     );
   } finally {
-    await session?.extensionRunner.emit({
-      type: "session_shutdown",
-      reason: "quit",
+    await h.close();
+  }
+});
+
+test("actual extension reload restores and rewraps one native provider without duplicate steps", async () => {
+  const h = await nativePi();
+  try {
+    await h.session.prompt("Before reload");
+    await h.session.reload();
+    await h.session.prompt("After reload");
+    const calls = h.server.calls;
+    assert.deepEqual(h.errors, []);
+    assert.equal(
+      calls.filter((c) => c.path === "/v1/chat/completions").length,
+      2,
+    );
+    assert.equal(calls.filter((c) => c.path.endsWith("/prepare")).length, 2);
+    assert.equal(calls.filter((c) => c.path.endsWith("/finalize")).length, 2);
+    assert.equal(
+      calls.filter((c) => c.path === "/runner/deregister").length,
+      2,
+    );
+    assert.equal(
+      new Set(
+        calls
+          .filter((c) => c.path === "/runner/register")
+          .map((c) => c.body.trace_id),
+      ).size,
+      1,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(h.session.messages),
+      /TEMPORARY_LESSON_/,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("ordinary native cancellation stops the provider and finalizes exactly once", async () => {
+  const h = await nativePi();
+  let entered!: () => void,
+    closed = false;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  try {
+    h.server.provider((_body, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.flushHeaders();
+      response.once("close", () => {
+        closed = true;
+      });
+      entered();
     });
-    session?.dispose();
-    if (previous === undefined) delete process.env.SOVARA_EXEC_SERVER_URL;
-    else process.env.SOVARA_EXEC_SERVER_URL = previous;
-    if (previousToken === undefined) delete process.env.SOVARA_AGENT_TOKEN;
-    else process.env.SOVARA_AGENT_TOKEN = previousToken;
-    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-    await server.close();
-    await rm(cwd, { recursive: true, force: true });
+    const work = h.session.prompt("Controlled slow call");
+    await started;
+    assert.equal(h.session.isIdle, false);
+    await h.session.abort();
+    await work;
+    for (let i = 0; i < 50 && !closed; i++) await delay(10);
+    assert.equal(closed, true);
+    const calls = h.server.calls;
+    assert.equal(
+      calls.filter((c) => c.path === "/v1/chat/completions").length,
+      1,
+    );
+    const finals = calls.filter((c) => c.path.endsWith("/finalize"));
+    assert.equal(finals.length, 1);
+    assert.equal(finals[0].body.status, "error");
+    assert.equal(
+      calls.filter((c) => c.path === "/runner/deregister").length,
+      1,
+    );
+    assert.equal(h.session.messages.at(-1)?.role, "assistant");
+  } finally {
+    await h.close();
+  }
+});
+
+test("failed SDK preparation and registration never repeat or suppress Pi's native call", async () => {
+  for (const path of ["/internal/runner/llm/prepare", "/runner/register"]) {
+    const h = await nativePi();
+    try {
+      h.server.reject(path);
+      await h.session.prompt("Native call survives recording unavailability");
+      assert.equal(
+        h.server.calls.filter((c) => c.path === "/v1/chat/completions").length,
+        1,
+      );
+      assert.equal(h.session.getLastAssistantText(), "ACK");
+      assert.equal(
+        h.server.calls.filter((c) => c.path.endsWith("/finalize")).length,
+        0,
+      );
+      assert.doesNotMatch(JSON.stringify(h.errors), /PRIVATE ERROR PAYLOAD/);
+    } finally {
+      await h.close();
+    }
+  }
+});
+
+test("a virtual model routes through the current native provider without an extra observation", async () => {
+  const h = await nativePi();
+  try {
+    let routed = 0;
+    h.runtime.registerVirtualModel({
+      provider: "sovara-test",
+      id: "virtual",
+      name: "Controlled router",
+      route(request) {
+        routed++;
+        assert.equal(request.signal?.aborted, false);
+        return {
+          model: h.runtime.getModel("sovara-test", "synthetic")!,
+          thinkingLevel: "off",
+        };
+      },
+    });
+    await h.session.setModel(h.runtime.getModel("sovara-test", "virtual")!);
+    await h.session.prompt(
+      "Route this task through the configured physical model.",
+    );
+    assert.equal(routed, 1);
+    assert.equal(
+      h.server.calls.filter((call) => call.path === "/v1/chat/completions")
+        .length,
+      1,
+    );
+    const prepared = h.server.calls.filter((call) =>
+      call.path.endsWith("/prepare"),
+    );
+    assert.equal(prepared.length, 1);
+    assert.equal(
+      JSON.parse(prepared[0]!.body.input_json).raw.body.model,
+      "synthetic",
+    );
+    assert.equal(
+      h.server.calls.filter((call) => call.path.endsWith("/finalize")).length,
+      1,
+    );
+    assert.equal(h.session.getLastAssistantText(), "ACK");
+  } finally {
+    await h.close();
   }
 });
