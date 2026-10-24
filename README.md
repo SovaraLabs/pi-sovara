@@ -52,7 +52,7 @@ npm run check
 npm run test:package
 ```
 
-`bootstrap:sdk` fetches the exact public commit in `SDK_REVISION`, builds and packs it, verifies the lockfile's SDK integrity, and runs `npm ci` with that local artifact. It restores the tracked lockfile afterward. Other dependencies use the committed lockfile. Build output and evidence stay under ignored `.validation/`; no private checkout or credential is required.
+`bootstrap:sdk` fetches the exact public commit in `SDK_REVISION`, installs its locked build dependencies, and builds and packs it. It verifies the SDK version and runs `npm ci` with the local artifact and its computed integrity, restoring the tracked lockfile afterward. Archive compression can differ across platforms; the source revision stays pinned. Other dependencies use the committed lockfile. Build output and evidence stay under ignored `.validation/`; no private checkout or credential is required.
 
 The package test installs both real tarballs in a clean consumer, then exercises Pi's one-command package installer against an isolated registry serving the unpublished artifacts. It runs actual native tool-loop, MCP, streaming, cancellation, reload, and summary tests from the installed extension. Paid provider and persisted-server acceptance is separate from the offline suite.
 
