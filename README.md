@@ -44,6 +44,19 @@ For a child process launched from an active Pi run, `SOVARA_PI_PARENT` carries t
 
 Child handoff is verified with Pi **1.2.0**. Pi has no extension hook around tool execution, so a small compatibility wrapper scopes the public `AgentSession.prompt` and `sendCustomMessage` entry points and copies the active turn context at subprocess launch. Native `spawn`, `exec`, `execFile`, and `fork` are covered, including references captured before extension loading. `spawnSync`, `execSync`, and `execFileSync` are covered through their module exports and ESM named imports. A synchronous function copied into a local variable before the extension loads cannot be replaced through public Node APIs and does not receive automatic handoff. Explicit `options.env` is always caller-owned: include an intended parent context there yourself, or supply an environment without that field to disable automatic handoff. Omitting `options.env` enables the automatic invocation context. Outside-session calls keep their original environment. Reload and settlement revoke the invocation context; delayed work cannot borrow a later turn. The incoming startup variable remains unchanged and is used only to initialize a child session.
 
+Pi's built-in Bash creates its own environment, so its exported native tool factory
+supplies the current parent through `spawnHook`, including when Pi itself is a
+child. The public definition keeps its identity, schemas, metadata and renderers;
+execution keeps the current shell path/prefix, output handling and cancellation.
+The same factory boundary is wired for native PowerShell; actual Windows/PowerShell
+execution is untested. Custom extension and SDK base-tool definitions remain
+caller-owned, including later replacements. Only positively identified native
+definitions in Pi 1.2.0 receive this shell integration: their public factory shape,
+schema references and native execute implementation must match. This is pinned
+version ownership detection; changed upstream shapes are conservatively untouched.
+An already-wrapped or immutable native `execute` remains caller-owned; its wrapper
+must supply any intended handoff through its environment.
+
 Native providers are delegated through Pi's public provider registration APIs. Wrappers bind requests by the actual invocation signal and preserve the original stream object, auth, options, and errors. Another extension replacing a provider remains authoritative; Sovara rebinds at the next run/context boundary and restores only registrations it still owns. Calls made independently by other extensions without the bound run signal are outside the Pi recording scope.
 
 ## Develop and validate this source preview

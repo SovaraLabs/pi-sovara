@@ -1,12 +1,25 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
-import { AgentSession, VERSION } from "@earendil-works/pi-coding-agent";
+import {
+  AgentSession,
+  createBashToolDefinition,
+  createPowerShellToolDefinition,
+  VERSION,
+} from "@earendil-works/pi-coding-agent";
 import type { Turn } from "@sovara/sdk";
 
 export const PARENT_ENV = "SOVARA_PI_PARENT";
 type Invocation = { owner: Owner; turn?: Turn };
-type Owner = { manager?: object; invocation?: Invocation };
+type Definition = NonNullable<ReturnType<AgentSession["getToolDefinition"]>>;
+type Owner = {
+  manager?: object;
+  invocation?: Invocation;
+  shells: Map<
+    Definition,
+    { original: Definition["execute"]; wrapper: Definition["execute"] }
+  >;
+};
 const key = Symbol.for("sovara.pi.childHandoff.v1");
 type Runtime = {
   context: AsyncLocalStorage<Invocation | undefined>;
@@ -39,6 +52,7 @@ function install(): Runtime {
     const original = AgentSession.prototype[name];
     const wrapper = function (this: AgentSession, ...args: unknown[]) {
       const owner = sessions.get(this.sessionManager);
+      if (owner) bindNativeShells(this, owner);
       // A nested unrelated session must not borrow its caller's authority.
       return context.run(owner ? { owner } : undefined, () =>
         Reflect.apply(original, this, args),
@@ -56,6 +70,70 @@ function install(): Runtime {
       ? JSON.stringify(invocation.turn.exportParentContext())
       : undefined;
   };
+  function bindNativeShells(session: AgentSession, owner: Owner): void {
+    for (const name of ["bash", "powershell"] as const) {
+      const info = session.getAllTools().find((tool) => tool.name === name);
+      if (
+        info?.sourceInfo.source !== "builtin" ||
+        info.sourceInfo.path !== `builtin:${name}`
+      )
+        continue;
+      const definition = session.getToolDefinition(name);
+      if (!definition || owner.shells.has(definition)) continue;
+      const template =
+        name === "bash"
+          ? createBashToolDefinition(session.sessionManager.getCwd())
+          : createPowerShellToolDefinition(session.sessionManager.getCwd());
+      // Pi also labels synthesized SDK base-tool overrides as builtin. Those
+      // omit the native factory's prompt/render fields and must stay untouched.
+      // This pinned-version ownership check also declines third-party execute
+      // wrappers; it is not an attempt to recognize arbitrary future Pi tools.
+      if (
+        !Object.keys(template).every((key) => Object.hasOwn(definition, key)) ||
+        definition.parameters !== template.parameters ||
+        definition.outputSchema !== template.outputSchema ||
+        definition.description !== template.description ||
+        definition.promptSnippet !== template.promptSnippet ||
+        Object.getOwnPropertyDescriptor(definition, "execute")?.writable !==
+          true ||
+        Function.prototype.toString.call(definition.execute) !==
+          Function.prototype.toString.call(template.execute)
+      )
+        continue;
+      const original = definition.execute;
+      const wrapper: Definition["execute"] = function (this: unknown, ...args) {
+        if (context.getStore()?.owner !== owner)
+          return Reflect.apply(original, this, args);
+        // Pi's native shell always constructs an env object. Its public factory
+        // hook is the authoritative place to replace the inherited startup context.
+        const spawnHook = (spawn: {
+          command: string;
+          cwd: string;
+          env: NodeJS.ProcessEnv;
+        }) => {
+          const env = { ...spawn.env },
+            value = parent();
+          if (value === undefined) delete env[PARENT_ENV];
+          else env[PARENT_ENV] = value;
+          return { ...spawn, env };
+        };
+        const settings = session.settingsManager.getSettings();
+        const native =
+          name === "bash"
+            ? createBashToolDefinition(session.sessionManager.getCwd(), {
+                shellPath: settings.shellPath,
+                commandPrefix: settings.shellCommandPrefix,
+                spawnHook,
+              })
+            : createPowerShellToolDefinition(session.sessionManager.getCwd(), {
+                spawnHook,
+              });
+        return Reflect.apply(native.execute, this, args);
+      };
+      definition.execute = wrapper;
+      owner.shells.set(definition, { original, wrapper });
+    }
+  }
   // All native async child APIs, including previously captured imports, reach
   // this public method after Node normalizes arguments and envPairs.
   const prototype = childProcess.ChildProcess
@@ -114,7 +192,7 @@ function install(): Runtime {
 
 /** Incoming process context is configuration; live authority stays invocation-local. */
 export function bindChildHandoff() {
-  const owner: Owner = {};
+  const owner: Owner = { shells: new Map() };
   let runtime: Runtime | undefined;
   return {
     bind(manager: object) {
@@ -138,6 +216,9 @@ export function bindChildHandoff() {
     },
     dispose() {
       this.closeTurn();
+      for (const [definition, { original, wrapper }] of owner.shells)
+        if (definition.execute === wrapper) definition.execute = original;
+      owner.shells.clear();
       if (!runtime) return;
       if (owner.manager && runtime.sessions.get(owner.manager) === owner)
         runtime.sessions.delete(owner.manager);

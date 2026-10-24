@@ -200,6 +200,7 @@ try {
       "test/coexistence.test.ts",
       "test/session.test.ts",
       "test/handoff.test.ts",
+      "test/native-shell.test.ts",
       "test/cli-handoff.test.ts",
     ],
     {
