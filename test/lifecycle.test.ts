@@ -132,14 +132,19 @@ test("child handoff preserves durable trace through turns and stores no credenti
   try {
     await h.start();
     await h.prompt();
-    const first = JSON.parse(process.env.SOVARA_PI_PARENT!);
+    const first = h
+      .entries()
+      .find((entry) => entry.customType === "sovara-child-v1")!.data;
     assert.notEqual(first.traceId, h.parent!.traceId);
+    assert.equal(process.env.SOVARA_PI_PARENT, h.originalParent);
     await h.emit("agent_settled", { aborted: false });
     assert.equal(process.env.SOVARA_PI_PARENT, h.originalParent);
     await h.prompt();
-    const second = JSON.parse(process.env.SOVARA_PI_PARENT!);
-    assert.equal(second.traceId, first.traceId);
-    assert.notEqual(second.recordingId, first.recordingId);
+    const second = h.backend.calls.find(
+      (c) => c.path === "/runner/subtrace/attach",
+    )!.body;
+    assert.equal(second.trace_id, first.traceId);
+    assert.equal(process.env.SOVARA_PI_PARENT, h.originalParent);
     await h.emit("agent_settled", { aborted: false });
     assert.equal(
       h.backend.calls.filter((c) => c.path === "/runner/subtrace").length,

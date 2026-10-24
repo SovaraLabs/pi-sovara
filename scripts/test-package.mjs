@@ -199,6 +199,8 @@ try {
       "test/mcp.test.ts",
       "test/coexistence.test.ts",
       "test/session.test.ts",
+      "test/handoff.test.ts",
+      "test/cli-handoff.test.ts",
     ],
     {
       cwd: root,

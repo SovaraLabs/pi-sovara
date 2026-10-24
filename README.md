@@ -6,7 +6,7 @@ Sovara adds your team's lessons to Pi's actual provider requests and records mod
 
 This branch is a source preview. Its SDK dependency must be published before this version of the extension is released; no registry release is implied by this PR. The source-preview commands below work with the exact public SDK revision without publishing either package.
 
-After the coordinated release, use Node 24.22.1 or newer and Pi 1.2.x:
+After the coordinated release, use Node 24.22.1 or newer and Pi 1.2.0:
 
 ```sh
 pi install npm:@sovara/pi
@@ -40,7 +40,9 @@ The SDK prepares each supported native provider HTTP request once, sends the pre
 
 Each user run has its own recording and logical turn in the durable Pi session trace. Resumed sessions retain their project binding. New or forked sessions receive their own binding. Native branch summaries and compaction run in separate logical turns, including their retries and cancellation. A summary during an active run shares that recording without closing the ordinary turn.
 
-For a child process launched from an active Pi run, `SOVARA_PI_PARENT` carries the SDK's versioned parent context. It contains a scoped write credential: pass it only to the intended child and do not log it. The child creates or reattaches only its own trace, keeps the original parent/project/lesson scope, and cannot close the parent through this API. Only the nonsecret child trace mapping is saved in Pi's session. The parent must be active when a child is created or reattached. Child attachment requires a server advertising `child_attachment_scope`.
+For a child process launched from an active Pi run, `SOVARA_PI_PARENT` carries the SDK's versioned parent context in that child's environment. The extension never publishes a live turn credential into the parent process environment. It contains a scoped write credential: pass it only to the intended child and do not log it. The child creates or reattaches only its own trace, keeps the original parent/project/lesson scope, and cannot close the parent through this API. Only the nonsecret child trace mapping is saved in Pi's session. The parent must be active when a child is created or reattached. Child attachment requires a server advertising `child_attachment_scope`.
+
+Child handoff is verified with Pi **1.2.0**. Pi has no extension hook around tool execution, so a small compatibility wrapper scopes the public `AgentSession.prompt` and `sendCustomMessage` entry points and copies the active turn context at subprocess launch. Native `spawn`, `exec`, `execFile`, and `fork` are covered, including references captured before extension loading. `spawnSync`, `execSync`, and `execFileSync` are covered through their module exports and ESM named imports. A synchronous function copied into a local variable before the extension loads cannot be replaced through public Node APIs and does not receive automatic handoff. Explicit `options.env` is always caller-owned: include an intended parent context there yourself, or supply an environment without that field to disable automatic handoff. Omitting `options.env` enables the automatic invocation context. Outside-session calls keep their original environment. Reload and settlement revoke the invocation context; delayed work cannot borrow a later turn. The incoming startup variable remains unchanged and is used only to initialize a child session.
 
 Native providers are delegated through Pi's public provider registration APIs. Wrappers bind requests by the actual invocation signal and preserve the original stream object, auth, options, and errors. Another extension replacing a provider remains authoritative; Sovara rebinds at the next run/context boundary and restores only registrations it still owns. Calls made independently by other extensions without the bound run signal are outside the Pi recording scope.
 

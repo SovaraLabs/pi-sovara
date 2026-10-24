@@ -7,15 +7,15 @@ import { loadConfig, type Config } from "./config.ts";
 import { Recorder, createClient } from "./recorder.ts";
 import { bindProviders } from "./provider.ts";
 import { connectionDetails, explainError } from "./diagnostics.ts";
+import { bindChildHandoff, PARENT_ENV } from "./child-handoff.ts";
 
-const PARENT_ENV = "SOVARA_PI_PARENT";
 const CONFIG_ENTRY = "sovara-config-v1";
 const CHILD_ENTRY = "sovara-child-v1";
 
 export default function sovara(pi: ExtensionAPI): void {
   const providers = bindProviders(pi);
   const originalParent = process.env[PARENT_ENV];
-  let publishedParent: string | undefined;
+  const handoff = bindChildHandoff();
   let recorder: Recorder | undefined;
   let selectedConfig: Config | undefined;
   let lastError: string | undefined;
@@ -30,16 +30,6 @@ export default function sovara(pi: ExtensionAPI): void {
       }
     | undefined;
   let operations = Promise.resolve();
-  const restoreParent = () => {
-    if (
-      publishedParent !== undefined &&
-      process.env[PARENT_ENV] === publishedParent
-    ) {
-      if (originalParent === undefined) delete process.env[PARENT_ENV];
-      else process.env[PARENT_ENV] = originalParent;
-    }
-    publishedParent = undefined;
-  };
   const status = (ctx: ExtensionContext, text: string) => {
     if (ctx.hasUI) ctx.ui.setStatus("sovara", `sovara: ${text}`);
   };
@@ -83,7 +73,7 @@ export default function sovara(pi: ExtensionAPI): void {
     await active.recorder.close(cancelled);
   }
   async function closeTurn(cancelled = false): Promise<void> {
-    restoreParent();
+    handoff.closeTurn();
     for (const signal of signals) providers.unbind(signal);
     signals.clear();
     await recorder?.close(cancelled);
@@ -93,6 +83,7 @@ export default function sovara(pi: ExtensionAPI): void {
     await closeTurn(true);
     recorder = undefined;
     providers.dispose();
+    handoff.dispose();
   }
 
   pi.registerCommand("sovara", {
@@ -193,6 +184,7 @@ export default function sovara(pi: ExtensionAPI): void {
       if (!saved || _event.reason === "fork" || _event.reason === "new")
         pi.appendEntry(CONFIG_ENTRY, { projectName: config.projectName });
       providers.install(ctx);
+      handoff.bind(ctx.sessionManager);
       status(ctx, `${config.projectName} · ready`);
     }),
   );
@@ -209,8 +201,7 @@ export default function sovara(pi: ExtensionAPI): void {
         event.messageType === "user" ? event.prompt : event.message.content,
         ctx.signal,
       );
-      publishedParent = JSON.stringify(recorder.turn!.exportParentContext());
-      process.env[PARENT_ENV] = publishedParent;
+      handoff.activate(recorder.turn!);
       status(ctx, `${recorder.config.projectName} · recording`);
     }),
   );

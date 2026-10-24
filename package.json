@@ -36,7 +36,7 @@
     "test:package": "node scripts/test-package.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=1.2.0 <2"
+    "@earendil-works/pi-coding-agent": "1.2.0"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.2.0",
