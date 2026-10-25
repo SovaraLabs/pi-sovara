@@ -9,6 +9,8 @@ import { bindProviders } from "./provider.ts";
 import { connectionDetails, explainError } from "./diagnostics.ts";
 import { bindChildHandoff, PARENT_ENV } from "./child-handoff.ts";
 
+export { exportParentContext } from "./child-handoff.ts";
+
 const CONFIG_ENTRY = "sovara-config-v1";
 const CHILD_ENTRY = "sovara-child-v1";
 

@@ -30,13 +30,15 @@ const shell = promisify(execShell);
 const capturedSpawn = spawn;
 const capturedSync = spawnSync;
 const originalPrompt = AgentSession.prototype.prompt;
+const subprocessMethods = ["spawn", "exec", "execFile", "fork", "spawnSync", "execFileSync", "execSync"] as const;
+const subprocessDescriptors = subprocessMethods.map(name => Object.getOwnPropertyDescriptor(childProcess, name));
 const originalSpawn = (
   childProcess.ChildProcess.prototype as unknown as { spawn: unknown }
 ).spawn;
 const readParent = "console.log(process.env.SOVARA_PI_PARENT || 'null')";
 const args = ["--input-type=module", "-e", readParent];
-async function spawnParent() {
-  const child = capturedSpawn(process.execPath, args);
+async function spawnParent(env: NodeJS.ProcessEnv) {
+  const child = capturedSpawn(process.execPath, args, { env });
   let text = "";
   child.stdout.on("data", (chunk) => {
     text += chunk;
@@ -50,7 +52,7 @@ async function spawnParent() {
   return JSON.parse(text);
 }
 
-test("native overlapping sessions hand children their own turn and preserve subprocess semantics", async () => {
+test("native overlapping sessions explicitly export only their own active turn and never intercept subprocesses", async () => {
   const server = await fixtureServer();
   const directory = await mkdtemp(join(tmpdir(), "pi-parent-concurrent-"));
   const previous = {
@@ -85,7 +87,15 @@ test("native overlapping sessions hand children their own turn and preserve subp
   });
   const sessions: Awaited<ReturnType<typeof createAgentSession>>["session"][] =
     [];
+  const ownerModule = await import(resolve(process.env.SOVARA_TEST_PACKAGE_ROOT ?? ".", "src/index.ts"));
+  const { exportParentContext } = process.env.SOVARA_TEST_HELPER_PACKAGE_ROOT
+    ? await import(resolve(process.env.SOVARA_TEST_HELPER_PACKAGE_ROOT, "src/index.ts"))
+    : ownerModule;
+  if (process.env.SOVARA_TEST_HELPER_PACKAGE_ROOT)
+    assert.notEqual(exportParentContext, ownerModule.exportParentContext);
   const children: Record<string, any[]> = { A: [], B: [] };
+  const contexts: Record<string, any> = {};
+  assert.throws(() => exportParentContext({ sessionManager: {} }), /active recorded Pi turn/);
   const late: Record<string, () => Promise<any>> = {};
   let releases: Record<string, () => void> = {};
   let entered: Record<string, () => void> = {};
@@ -137,32 +147,42 @@ test("native overlapping sessions hand children their own turn and preserve subp
               label: "Spawn",
               description: "Controlled child",
               parameters: Type.Object({}),
-              async execute() {
+              async execute(_callId, _params, _signal, _update, ctx) {
+                contexts[id] = ctx;
                 assert.equal(process.env.SOVARA_PI_PARENT, undefined);
+                assert.equal(AgentSession.prototype.prompt, originalPrompt);
+                assert.deepEqual(subprocessMethods.map(name => Object.getOwnPropertyDescriptor(childProcess, name)), subprocessDescriptors);
+                assert.equal((childProcess.ChildProcess.prototype as unknown as {spawn: unknown}).spawn, originalSpawn);
+                assert.equal(JSON.parse((await exec(process.execPath, args)).stdout), null);
+                const parent = exportParentContext(ctx);
+                assert(Object.isFrozen(parent));
+                assert.notEqual(exportParentContext(ctx), parent);
+                const env = { ...process.env, SOVARA_PI_PARENT: JSON.stringify(parent) };
                 const own = JSON.parse(
-                  (await exec(process.execPath, args)).stdout,
+                  (await exec(process.execPath, args, { env })).stdout,
                 );
                 const results = [
                   own,
                   JSON.parse(
-                    (await shell(`'${process.execPath}' '${childFile}'`))
+                    (await shell(`'${process.execPath}' '${childFile}'`, { env }))
                       .stdout,
                   ),
-                  await spawnParent(),
+                  await spawnParent(env),
                   JSON.parse(
-                    spawnSync(process.execPath, args, { encoding: "utf8" })
+                    spawnSync(process.execPath, args, { env, encoding: "utf8" })
                       .stdout,
                   ),
                   JSON.parse(
-                    execFileSync(process.execPath, args, { encoding: "utf8" }),
+                    execFileSync(process.execPath, args, { env, encoding: "utf8" }),
                   ),
                   JSON.parse(
                     execSync(`'${process.execPath}' '${childFile}'`, {
+                      env,
                       encoding: "utf8",
                     }),
                   ),
                 ];
-                const forked = fork(childFile, [], { silent: true });
+                const forked = fork(childFile, [], { env, silent: true });
                 let output = "";
                 forked.stdout!.on("data", (chunk) => {
                   output += chunk;
@@ -176,18 +196,18 @@ test("native overlapping sessions hand children their own turn and preserve subp
                 results.push(JSON.parse(output));
                 for (const result of results) assert.deepEqual(result, own);
                 // Explicit env remains caller-owned, including deliberate handoff/opt-out.
-                const env = { SOVARA_PI_PARENT: "CONTROLLED_EXPLICIT_VALUE" };
+                const override = { SOVARA_PI_PARENT: "CONTROLLED_EXPLICIT_VALUE" };
                 assert.equal(
                   (
                     await exec(
                       process.execPath,
                       ["-e", "console.log(process.env.SOVARA_PI_PARENT)"],
-                      { env },
+                      { env: override },
                     )
                   ).stdout.trim(),
                   "CONTROLLED_EXPLICIT_VALUE",
                 );
-                assert.deepEqual(env, {
+                assert.deepEqual(override, {
                   SOVARA_PI_PARENT: "CONTROLLED_EXPLICIT_VALUE",
                 });
                 assert.equal(
@@ -205,7 +225,7 @@ test("native overlapping sessions hand children their own turn and preserve subp
                   ),
                   null,
                 );
-                // An early saved sync function cannot be replaced through public Node APIs.
+                // Captured imports and native exports remain unchanged, with no automatic handoff.
                 assert.equal(
                   JSON.parse(
                     capturedSync(process.execPath, args, { encoding: "utf8" })
@@ -333,12 +353,15 @@ test("native overlapping sessions hand children their own turn and preserve subp
       );
       assert.equal(process.env.SOVARA_PI_PARENT, undefined);
       previousLate = { ...late };
+      for (const ctx of Object.values(contexts)) assert.throws(() => exportParentContext(ctx), /active recorded Pi turn/);
+      const stale = contexts.A;
       const wrapper = AgentSession.prototype.prompt;
       await sessions[0].reload();
+      assert.throws(() => exportParentContext(stale), /disposed|active|stale/i);
       assert.equal(
         AgentSession.prototype.prompt,
         wrapper,
-        "Reload keeps one shared wrapper while B owns it",
+        "Reload leaves the native prompt method unchanged",
       );
     }
     for (const callback of Object.values(previousLate))
@@ -371,6 +394,8 @@ test("native overlapping sessions hand children their own turn and preserve subp
       session.dispose();
     }
     assert.equal(AgentSession.prototype.prompt, originalPrompt);
+    assert.deepEqual(subprocessMethods.map(name => Object.getOwnPropertyDescriptor(childProcess, name)), subprocessDescriptors);
+    for (const ctx of Object.values(contexts)) assert.throws(() => exportParentContext(ctx));
     assert.equal(
       (childProcess.ChildProcess.prototype as unknown as { spawn: unknown })
         .spawn,

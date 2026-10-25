@@ -205,7 +205,13 @@ try {
     ],
     {
       cwd: root,
-      env: { ...installEnv, SOVARA_TEST_PACKAGE_ROOT: installed },
+      env: {
+        ...installEnv,
+        SOVARA_TEST_PACKAGE_ROOT: installed,
+        // A separate trusted extension resolves its helper from another physical
+        // package while the native session loads the installer-owned extension.
+        SOVARA_TEST_HELPER_PACKAGE_ROOT: join(consumer, "node_modules/@sovara/pi"),
+      },
       maxBuffer: 8 * 1024 * 1024,
     },
   );

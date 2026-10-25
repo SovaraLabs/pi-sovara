@@ -54,5 +54,8 @@
   },
   "dependencies": {
     "@sovara/sdk": "0.8.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
   }
 }

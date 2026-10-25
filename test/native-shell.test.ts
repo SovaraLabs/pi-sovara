@@ -267,7 +267,7 @@ export default function(pi) { pi.registerCommand("controlled-load-sovara", {
 }
 
 for (const inherited of [false, true])
-  test(`native bash supplies its current parent and preserves settings/definition/reload (incoming parent: ${inherited})`, async () => {
+  test(`native bash preserves startup environment, settings, definition and reload (incoming parent: ${inherited})`, async () => {
     const h = await harness();
     let ancestor;
     try {
@@ -291,32 +291,22 @@ for (const inherited of [false, true])
         fields = { ...original },
         execute = original.execute;
       await a.prompt();
-      const expected = inherited
-        ? (
-            a.session.sessionManager
-              .getEntries()
-              .find(
-                (e) =>
-                  e.type === "custom" && e.customType === "sovara-child-v1",
-              ) as any
-          ).data.traceId
-        : a.session.sessionManager.getSessionId();
+      const expectedParent = startup ? JSON.parse(startup) : undefined;
+      const checkParent = (value: any) => assert.deepEqual(value, expectedParent ? {
+        traceId: expectedParent.traceId,
+        projectName: expectedParent.projectName,
+        turnId: expectedParent.turnId,
+        hasToken: true,
+      } : null);
       const first = a.parent();
-      assert.equal(first.parent.traceId, expected);
-      assert.equal(first.parent.projectName, "shell-A");
-      assert.equal(first.parent.hasToken, true);
-      assert.ok(first.parent.turnId);
+      checkParent(first.parent);
       assert.equal(first.marker, "first");
       assert.equal(first.cwd, await realpath(a.cwd));
       assert.ok(first.path);
       assert.equal(process.env.SOVARA_PI_PARENT, startup);
       assert.equal(a.session.getToolDefinition("bash"), original);
-      assert.notEqual(original.execute, execute);
-      assert.deepEqual(
-        { ...original, execute },
-        fields,
-        "Only execute changes; native schema/renderers/metadata remain identical",
-      );
+      assert.equal(original.execute, execute);
+      assert.deepEqual(original, fields, "All native definition fields stay caller-owned");
       a.settings.setShellCommandPrefix("export SHELL_MARKER=changed");
       const shellPath = join(a.cwd, "controlled-shell"),
         shellMarker = join(a.cwd, "shell-selected");
@@ -333,7 +323,7 @@ for (const inherited of [false, true])
         "Native factories retain their settings until reload",
       );
       await assert.rejects(readFile(shellMarker, "utf8"), { code: "ENOENT" });
-      assert.notEqual(a.parent().parent.turnId, first.parent.turnId);
+      checkParent(a.parent().parent);
       await a.session.reload();
       assert.equal(
         original.execute,
@@ -343,7 +333,7 @@ for (const inherited of [false, true])
       await a.prompt();
       assert.equal(await readFile(shellMarker, "utf8"), "selected");
       assert.equal(a.parent().marker, "changed");
-      assert.equal(a.parent().parent.traceId, expected);
+      checkParent(a.parent().parent);
       assert.equal(process.env.SOVARA_PI_PARENT, startup);
       const current = a.session.getToolDefinition("bash")!;
       const newer = async () => ({ content: [] as any[], details: {} });
@@ -390,7 +380,7 @@ test("a session rebuilt while unloaded cannot authorize unseen factory closures 
   }
 });
 
-test("public observers preserve descriptors, receivers, other owners and later wrappers", async () => {
+test("extension never wraps public methods, property descriptors or caller getters", async () => {
   const h = await harness();
   const prototype = AgentSession.prototype;
   const active = Object.getOwnPropertyDescriptor(
@@ -448,7 +438,7 @@ test("public observers preserve descriptors, receivers, other owners and later w
       reason: "quit",
     });
     await b.prompt();
-    assert.equal(b.parent().parent.projectName, "shell-B");
+    assert.equal(b.parent().parent, null);
     assert.equal(
       Object.getOwnPropertyDescriptor(state, "tools")!.set,
       laterSetter,
@@ -476,7 +466,7 @@ test("public observers preserve descriptors, receivers, other owners and later w
   }
 });
 
-test("overlapping native bash sessions keep their own projects in both completion orders", async () => {
+test("overlapping native bash sessions receive no extension-generated parent in either completion order", async () => {
   const h = await harness();
   try {
     const a = await h.session("A"),
@@ -497,16 +487,7 @@ test("overlapping native bash sessions keep their own projects in both completio
         h.held.get(item === a ? "A" : "B")!();
         await work.get(item);
       }
-      for (const [id, item] of [
-        ["A", a],
-        ["B", b],
-      ] as const) {
-        assert.equal(
-          item.parent().parent.traceId,
-          item.session.sessionManager.getSessionId(),
-        );
-        assert.equal(item.parent().parent.projectName, `shell-${id}`);
-      }
+      for (const item of [a, b]) assert.equal(item.parent().parent, null);
       assert.equal(process.env.SOVARA_PI_PARENT, undefined);
     }
   } finally {
@@ -564,10 +545,7 @@ test("late and dynamic custom bash registration supersedes native ownership with
     assert.equal(a.results.at(-1).content[0].text, "dynamic replacement");
     await a.session.reload();
     await a.prompt();
-    assert.equal(
-      a.parent().parent.traceId,
-      a.session.sessionManager.getSessionId(),
-    );
+    assert.equal(a.parent().parent, null);
   } finally {
     await h.close();
   }
@@ -773,3 +751,41 @@ for (const customized of [false, true])
       await h.close();
     }
   });
+
+
+test("an earlier public getter and caller spawnHook retain execute identity and explicit omission", async () => {
+  const h = await harness();
+  const original = AgentSession.prototype.getToolDefinition;
+  const seen = new WeakSet<object>();
+  let customCalls = 0;
+  let replacement: ToolDefinition["execute"] | undefined;
+  const earlier: typeof original = function (this: AgentSession, name) {
+    const definition = Reflect.apply(original, this, [name]);
+    if (name === "bash" && definition && !seen.has(definition)) {
+      seen.add(definition);
+      replacement = createBashToolDefinition(this.sessionManager.getCwd(), {
+        spawnHook(request) {
+          customCalls++;
+          const env = { ...request.env };
+          delete env.SOVARA_PI_PARENT;
+          return { ...request, env };
+        },
+      }).execute;
+      definition.execute = replacement;
+    }
+    return definition;
+  };
+  AgentSession.prototype.getToolDefinition = earlier;
+  try {
+    const a = await h.session("A");
+    const definition = a.session.getToolDefinition("bash")!;
+    await a.prompt();
+    assert.equal(customCalls, 1);
+    assert.equal(a.parent().parent, null);
+    assert.equal(definition.execute, replacement);
+    assert.equal(AgentSession.prototype.getToolDefinition, earlier);
+  } finally {
+    await h.close();
+    AgentSession.prototype.getToolDefinition = original;
+  }
+});

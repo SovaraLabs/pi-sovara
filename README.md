@@ -40,28 +40,54 @@ The SDK prepares each supported native provider HTTP request once, sends the pre
 
 Each user run has its own recording and logical turn in the durable Pi session trace. Resumed sessions retain their project binding. New or forked sessions receive their own binding. Native branch summaries and compaction run in separate logical turns, including their retries and cancellation. A summary during an active run shares that recording without closing the ordinary turn.
 
-For a child process launched from an active Pi run, `SOVARA_PI_PARENT` carries the SDK's versioned parent context in that child's environment. The extension never publishes a live turn credential into the parent process environment. It contains a scoped write credential: pass it only to the intended child and do not log it. The child creates or reattaches only its own trace, keeps the original parent/project/lesson scope, and cannot close the parent through this API. Only the nonsecret child trace mapping is saved in Pi's session. The parent must be active when a child is created or reattached. Child attachment requires a server advertising `child_attachment_scope`.
+### Explicit child handoff
 
-Child handoff is verified with Pi **1.2.0**. Pi has no extension hook around tool execution, so a small compatibility wrapper scopes the public `AgentSession.prompt` and `sendCustomMessage` entry points and copies the active turn context at subprocess launch. Native `spawn`, `exec`, `execFile`, and `fork` are covered, including references captured before extension loading. `spawnSync`, `execSync`, and `execFileSync` are covered through their module exports and ESM named imports. A synchronous function copied into a local variable before the extension loads cannot be replaced through public Node APIs and does not receive automatic handoff. Explicit `options.env` is always caller-owned: include an intended parent context there yourself, or supply an environment without that field to disable automatic handoff. Omitting `options.env` enables the automatic invocation context. Outside-session calls keep their original environment. Reload and settlement revoke the invocation context; delayed work cannot borrow a later turn. The incoming startup variable remains unchanged and is used only to initialize a child session.
+Bash, PowerShell and other subprocesses keep their normal caller-owned behavior.
+Sovara does not replace tools, executors, spawn hooks, Node subprocess functions,
+or their environments. It never inserts a live parent credential automatically
+and never changes `process.env`. An incoming `SOVARA_PI_PARENT` remains ordinary
+startup environment: native shell inheritance is unchanged, so it must not be
+mistaken for the current Pi turn's context.
 
-Pi's built-in Bash creates its own environment. For sessions initialized while
-the extension is loaded, a compatibility observer records the native executor
-when Pi publishes its tools through the public `agent.state.tools` property.
-The extension delegates that exact executor and supplies the current parent at
-its subprocess launch, including when Pi itself is a child. It keeps the original
-definition, schemas, renderers, captured shell settings, output handling and
-cancellation. Shell settings take effect on native reload. The same boundary is
-wired for PowerShell; actual Windows/PowerShell execution is untested.
+To link a shell-launched child, trusted launcher code must deliberately export
+that session's active turn and supply it only in the intended child's environment.
+A separate Pi extension can import the public helper:
 
-Custom extension tools, SDK base-tool overrides, changed executors and caller
-spawn hooks remain caller-owned. Ownership uses the saved executor reference,
-never function-source equality or a recreated factory closure. A session created
-before the observer was loaded, or rebuilt while it was unloaded, has unknown
-ownership and its native shell remains untouched. Such a shell or an existing
-execute wrapper must supply any intended handoff itself. Public method/property
-descriptors and later wrappers are preserved; reload restores only our own
-wrappers. This boundary is specific to Pi 1.2.0 and must be reverified before
-widening the supported version.
+```ts
+import { exportParentContext } from "@sovara/pi";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const exec = promisify(execFile);
+// Inside your registered tool's execute(_id, args, signal, _update, ctx):
+const parent = exportParentContext(ctx);
+await exec("pi", ["-p", args.task], {
+  signal,
+  env: { ...process.env, SOVARA_PI_PARENT: JSON.stringify(parent) },
+});
+```
+
+`exportParentContext(ctx)` returns the SDK's immutable, versioned `ParentContext`
+snapshot for that exact session's active recorded turn. It throws outside an
+active recorded turn or after the supplied Pi context has been disposed/reloaded.
+Concurrent sessions cannot select each other's context through this helper.
+Capture it immediately for the intended launch; the returned object is a snapshot,
+not an ambient context that follows later turns. Closing the turn, disposing or
+reloading revokes local export through that binding; an already-exported snapshot
+is still a bearer capability governed by the server and recording lifetime.
+Do not put it in prompts, Bash
+command text, tool arguments/results, Pi history, logs, files or shared
+`process.env`: it contains a scoped write credential. The launcher chooses the
+child command and environment; exporting alone never launches a process.
+
+The receiving extension reads `SOVARA_PI_PARENT` during initialization and creates
+or reattaches only its own child trace. It keeps the original parent, project and
+lesson scope, and cannot close the parent through this API. Only the nonsecret
+child trace mapping is saved in Pi's session. Resuming the same child session uses
+that mapping with a freshly exported active parent context. The parent must be
+active when a child is created or reattached; child attachment requires a server
+advertising `child_attachment_scope`. A Pi session that is itself a child exports
+its own active child turn, rather than forwarding its startup ancestor context.
 
 Native providers are delegated through Pi's public provider registration APIs. Wrappers bind requests by the actual invocation signal and preserve the original stream object, auth, options, and errors. Another extension replacing a provider remains authoritative; Sovara rebinds at the next run/context boundary and restores only registrations it still owns. Calls made independently by other extensions without the bound run signal are outside the Pi recording scope.
 
