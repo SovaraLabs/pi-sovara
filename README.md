@@ -108,3 +108,9 @@ This cutover removes the extension's custom runner client, `pi.llm` event record
 ## License
 
 MIT. The `@sovara/sdk` runtime dependency is Apache-2.0.
+
+### Core SDK source preview
+
+The core SDK source now lives in the private Sovara monorepo. Preview bootstrap
+commands require Git access to that repository. Public CI and external installs
+need a compatible published SDK release; this PR does not publish one.

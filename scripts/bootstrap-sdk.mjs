@@ -9,7 +9,7 @@ const exec = promisify(execFile);
 const root = resolve(import.meta.dirname, "..");
 const revision = (await readFile(join(root, "SDK_REVISION"), "utf8")).trim();
 if (!/^[a-f0-9]{40}$/.test(revision))
-  throw Error("SDK_REVISION must contain an exact public source commit");
+  throw Error("SDK_REVISION must contain an exact monorepo source commit");
 const source = await mkdtemp(join(tmpdir(), "pi-sdk-source-"));
 const output = join(root, ".validation/sdk");
 await mkdir(output, { recursive: true });
@@ -21,16 +21,16 @@ try {
     "remote",
     "add",
     "origin",
-    "https://github.com/SovaraLabs/typescript-sdk.git",
+    "https://github.com/SovaraLabs/sovara.git",
   ]);
   await run("git", ["fetch", "--quiet", "--depth=1", "origin", revision]);
   await run("git", ["checkout", "--quiet", "--detach", "FETCH_HEAD"]);
   if ((await run("git", ["rev-parse", "HEAD"])).stdout.trim() !== revision)
     throw Error("SDK source revision mismatch");
-  await run("npm", ["ci", "--ignore-scripts"]);
-  await run("npm", ["run", "build"]);
+  await run("npm", ["ci", "--ignore-scripts"], join(source, "runner_ts"));
+  await run("npm", ["run", "build"], join(source, "runner_ts"));
   const manifest = JSON.parse(
-    await readFile(join(source, "package.json"), "utf8"),
+    await readFile(join(source, "runner_ts/package.json"), "utf8"),
   );
   const own = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   if (
@@ -46,7 +46,7 @@ try {
         "--ignore-scripts",
         "--pack-destination",
         output,
-      ])
+      ], join(source, "runner_ts"))
     ).stdout,
   );
   const tarball = join(output, pack.filename);
@@ -65,7 +65,7 @@ try {
     .update(await readFile(tarball))
     .digest("base64")}`;
   // npm's gzip bytes vary across platform/zlib builds even when the unpacked
-  // archive is identical. The exact public source commit and its npm lockfile
+  // archive is identical. The exact monorepo source commit and its npm lockfile
   // identify this preview build; npm ci verifies the local artifact's integrity.
   entry.resolved = `file:${tarball}`;
   entry.integrity = integrity;
@@ -84,7 +84,7 @@ try {
     ) + "\n",
   );
   console.log(
-    `Installed @sovara/sdk@${manifest.version} from public source ${revision}; sha256 ${sha256}`,
+    `Installed @sovara/sdk@${manifest.version} from monorepo source ${revision}; sha256 ${sha256}`,
   );
 } finally {
   await rm(source, { recursive: true, force: true });
