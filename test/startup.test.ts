@@ -20,7 +20,7 @@ const config = {
   authentication: "none" as const,
 };
 const metadata = {
-  compatibility: { component: "exec-server", contracts: { "runner-api": [4] } },
+  compatibility: { component: "exec-server", contracts: { "runner-api": [5] } },
 };
 const refused = () =>
   new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } });
@@ -79,7 +79,7 @@ test("HTTP, malformed, incompatible and timeout failures do not trigger startup"
       Response.json({
         compatibility: {
           component: "exec-server",
-          contracts: { "runner-api": [5] },
+          contracts: { "runner-api": [4] },
         },
       }),
     async () => {
@@ -121,7 +121,7 @@ test("post-start health is still required and startup is never retried in a loop
       Response.json({
         compatibility: {
           component: "exec-server",
-          contracts: { "runner-api": [5] },
+          contracts: { "runner-api": [4] },
         },
       }),
   ]) {

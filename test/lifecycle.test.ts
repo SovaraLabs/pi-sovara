@@ -126,9 +126,9 @@ test("child processes inherit project and restore parent credentials", async () 
     projectName: "parent-project",
     scope: {
       recording: {
-        run_id: "parent-run",
+        trace_id: "parent-run",
         recording_id: "parent-recording",
-        run_write_token: "parent-secret",
+        trace_write_token: "parent-secret",
         project_id: "parent-project-id",
       },
       turnId: "parent-turn",
@@ -141,10 +141,10 @@ test("child processes inherit project and restore parent credentials", async () 
     await h.start();
     assert.match(h.statuses.at(-1)!, /parent-project/);
     await h.prompt();
-    const subrun = h.backend.calls.find((c) => c.path === "/runner/subrun")!;
-    assert.equal(subrun.body.parent_run_id, "parent-run");
+    const subrun = h.backend.calls.find((c) => c.path === "/runner/subtrace")!;
+    assert.equal(subrun.body.parent_trace_id, "parent-run");
     assert.equal(subrun.body.turn_id, "parent-turn");
-    assert.equal(subrun.headers["x-sovara-run-token"], "parent-secret");
+    assert.equal(subrun.headers["x-sovara-trace-token"], "parent-secret");
     assert.equal(
       JSON.parse(process.env.SOVARA_PI_PARENT!).projectName,
       "parent-project",
@@ -413,7 +413,7 @@ test("a failed retrieval response is recorded as failure while Pi continues", as
 test("sovara command retains server and recovery instructions when connection fails", async () => {
   const h = await harness();
   try {
-    h.backend.versions([5]);
+    h.backend.versions([6]);
     await h.start();
     await h.command("sovara");
     const text = h.notifications.at(-1)!;
@@ -422,7 +422,7 @@ test("sovara command retains server and recovery instructions when connection fa
     assert.match(text, /Connection: unavailable/);
     assert.match(text, /compatible Sovara\/Pi extension versions/);
     assert.doesNotMatch(text, /agent-secret|recording-secret/);
-    h.backend.versions([4]);
+    h.backend.versions([5]);
     await h.emit("session_start", { reason: "reload" });
     await h.command("sovara");
     assert.match(h.notifications.at(-1)!, /Connection: server reachable/);

@@ -5,9 +5,9 @@ import type { Config } from "./config.ts";
 import { redact } from "./redaction.ts";
 
 export interface Recording {
-  run_id: string;
+  trace_id: string;
   recording_id: string;
-  run_write_token: string;
+  trace_write_token: string;
   project_id: string;
 }
 export interface Scope {
@@ -81,7 +81,7 @@ async function startLocalServer(execUrl: string): Promise<void> {
   });
 }
 
-/** Narrow runner-api 4 adapter. No SDK monkey patches or provider credentials. */
+/** Narrow runner-api 5 adapter. No SDK monkey patches or provider credentials. */
 export class SovaraClient {
   private compatible = false;
   private readonly secrets = new Set<string>();
@@ -100,7 +100,7 @@ export class SovaraClient {
     return redact(value, [
       ...this.secrets,
       ...Object.values(this.config.authHeaders),
-      recording?.run_write_token ?? "",
+      recording?.trace_write_token ?? "",
     ]);
   }
 
@@ -173,7 +173,7 @@ export class SovaraClient {
       versions.length > 64 ||
       versions.some((v) => !Number.isInteger(v) || v < 1 || v > 2147483647) ||
       new Set(versions).size !== versions.length ||
-      !versions.includes(4)
+      !versions.includes(5)
     ) {
       throw new SovaraError("incompatible_runner_api");
     }
@@ -200,9 +200,9 @@ export class SovaraClient {
         "x-sovara-component": "pi-extension",
         "x-sovara-version": "0.1.0",
         "x-sovara-contract": "runner-api",
-        "x-sovara-contract-version": "4",
+        "x-sovara-contract-version": "5",
         ...(recording
-          ? { "x-sovara-run-token": recording.run_write_token }
+          ? { "x-sovara-trace-token": recording.trace_write_token }
           : this.config.authHeaders),
       },
       body: JSON.stringify(this.sanitize(body, recording)),
@@ -222,7 +222,7 @@ export class SovaraClient {
         "/runner/register",
         {
           name: "Pi session",
-          run_id: `pi:${sessionId}`,
+          trace_id: `pi:${sessionId}`,
           project_name: this.config.projectName,
           project_root: cwd,
           code_version: null,
@@ -233,11 +233,11 @@ export class SovaraClient {
     );
   }
   private recording(data: unknown): Recording {
-    this.protect(field(data, "run_write_token"));
+    this.protect(field(data, "trace_write_token"));
     return {
-      run_id: field(data, "run_id"),
+      trace_id: field(data, "trace_id"),
       recording_id: field(data, "recording_id"),
-      run_write_token: field(data, "run_write_token"),
+      trace_write_token: field(data, "trace_write_token"),
       project_id: field(data, "project_id"),
     };
   }
@@ -247,9 +247,9 @@ export class SovaraClient {
     signal?: AbortSignal,
   ): Promise<Recording> {
     const data = await this.request(
-      "/runner/subrun",
+      "/runner/subtrace",
       {
-        parent_run_id: parent.recording.run_id,
+        parent_trace_id: parent.recording.trace_id,
         turn_id: parent.turnId,
         name: `Pi subagent ${sessionId}`,
         lesson_scope_paths: null,
@@ -269,12 +269,12 @@ export class SovaraClient {
   ): Promise<Scope> {
     const data = await this.request(
       "/runner/turns",
-      { run_id: recording.run_id, turn_input: this.text(input, recording) },
+      { trace_id: recording.trace_id, turn_input: this.text(input, recording) },
       recording,
       signal,
     );
     if (
-      field(data, "run_id") !== recording.run_id ||
+      field(data, "trace_id") !== recording.trace_id ||
       field(data, "recording_id") !== recording.recording_id
     )
       throw new SovaraError("invalid_turn_identity");
@@ -283,7 +283,7 @@ export class SovaraClient {
   async close(recording: Recording, signal?: AbortSignal): Promise<void> {
     await this.request(
       "/runner/deregister",
-      { run_id: recording.run_id },
+      { trace_id: recording.trace_id },
       recording,
       signal,
     );
@@ -295,9 +295,9 @@ export class SovaraClient {
     signal?: AbortSignal,
   ): Promise<void> {
     await this.request(
-      "/runner/run-io",
+      "/runner/trace-io",
       {
-        run_id: scope.recording.run_id,
+        trace_id: scope.recording.trace_id,
         turn_id: scope.turnId,
         kind,
         value: this.text(value, scope.recording),
@@ -314,7 +314,7 @@ export class SovaraClient {
     const data = await this.request(
       "/internal/lessons/retrieve",
       {
-        run_id: scope.recording.run_id,
+        trace_id: scope.recording.trace_id,
         turn_id: scope.turnId,
         raw_context: context,
         ignore_lesson_ids: [],
@@ -389,7 +389,7 @@ export class SovaraClient {
     const data = await this.request(
       "/internal/runner/llm/prepare",
       {
-        run_id: scope.recording.run_id,
+        trace_id: scope.recording.trace_id,
         turn_id: scope.turnId,
         step_uuid: id,
         api_type: api,
@@ -414,7 +414,7 @@ export class SovaraClient {
     await this.request(
       "/internal/runner/llm/finalize",
       {
-        run_id: step.scope.recording.run_id,
+        trace_id: step.scope.recording.trace_id,
         turn_id: step.scope.turnId,
         step_uuid: step.id,
         api_type: step.api,

@@ -48,7 +48,7 @@ test(
       const headers = {
         "x-sovara-component": "pi-extension",
         "x-sovara-contract": "runner-api",
-        "x-sovara-contract-version": "4",
+        "x-sovara-contract-version": "5",
       };
       let connected = false;
       for (let i = 0; i < 100; i++) {
@@ -69,7 +69,7 @@ test(
         "/synthetic-project",
       );
       await recorder.start("First turn");
-      const runId = recorder.scope!.recording.run_id;
+      const runId = recorder.scope!.recording.trace_id;
       await recorder.prepareContext([
         { role: "user", content: "First turn", timestamp: 1 },
       ]);
@@ -105,7 +105,7 @@ test(
       );
       await recorder.close();
       await recorder.start("Resumed turn");
-      assert.equal(recorder.scope!.recording.run_id, runId);
+      assert.equal(recorder.scope!.recording.trace_id, runId);
       const seed = await fetch(
         `${execUrl}/health/test-lessons/${recorder.scope!.recording.project_id}`,
         { method: "POST", headers },
@@ -147,7 +147,7 @@ test(
           headers: {
             "x-sovara-component": "pi-extension",
             "x-sovara-contract": "runner-api",
-            "x-sovara-contract-version": "4",
+            "x-sovara-contract-version": "5",
           },
         });
         tree = await response.json();

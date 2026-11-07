@@ -8,7 +8,7 @@ export async function fixtureServer() {
   let rejectPath = "";
   let blockedPath = "";
   let reached: (() => void) | undefined;
-  let versions: unknown = [4];
+  let versions: unknown = [5];
   let retrieval: unknown;
   const server = createServer(async (req, res) => {
     let raw = "";
@@ -38,20 +38,20 @@ export async function fixtureServer() {
         };
         break;
       case "/runner/register":
-      case "/runner/subrun":
+      case "/runner/subtrace":
         response = {
-          run_id: "sovara-fixture",
+          trace_id: "sovara-fixture",
           recording_id: randomUUID(),
-          run_write_token: "recording-secret",
+          trace_write_token: "recording-secret",
           project_id: "project-fixture",
         };
         break;
       case "/runner/turns": {
         const registered = calls.filter((c) =>
-          ["/runner/register", "/runner/subrun"].includes(c.path),
+          ["/runner/register", "/runner/subtrace"].includes(c.path),
         ).length;
         response = {
-          run_id: body.run_id,
+          trace_id: body.trace_id,
           recording_id: recordingIds[registered - 1],
           turn_id: randomUUID(),
         };
@@ -74,7 +74,7 @@ export async function fixtureServer() {
         };
         break;
     }
-    if (["/runner/register", "/runner/subrun"].includes(req.url!))
+    if (["/runner/register", "/runner/subtrace"].includes(req.url!))
       recordingIds.push((response as any).recording_id);
     res.end(JSON.stringify(response));
   });

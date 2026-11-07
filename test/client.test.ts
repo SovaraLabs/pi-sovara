@@ -9,7 +9,7 @@ test("negotiation fails closed on missing, incompatible and malformed contracts"
   try {
     const client = new SovaraClient(server.config);
     await assert.rejects(client.register("one", "/repo"), /not_connected/);
-    for (const value of [undefined, [5], [4, 4], ["4"], []]) {
+    for (const value of [undefined, [4], [5, 5], ["5"], []]) {
       server.versions(value);
       await assert.rejects(client.connect(), /incompatible/);
       await assert.rejects(client.register("one", "/repo"), /not_connected/);
@@ -76,7 +76,7 @@ test("records resume, retrieval, provider retries, parallel tools, and exact tur
       (c) => c.path === "/runner/register",
     );
     assert.deepEqual(
-      registrations.map((c) => c.body.run_id),
+      registrations.map((c) => c.body.trace_id),
       ["pi:session-one", "pi:session-one"],
     );
     const preparations = server.calls.filter((c) =>
@@ -94,7 +94,7 @@ test("records resume, retrieval, provider retries, parallel tools, and exact tur
         (c) => c.body.step_uuid === finish.body.step_uuid,
       )!;
       assert.equal(finish.body.turn_id, prepare.body.turn_id);
-      assert.equal(finish.headers["x-sovara-run-token"], "recording-secret");
+      assert.equal(finish.headers["x-sovara-trace-token"], "recording-secret");
       assert.equal(finish.headers["x-sovara-agent-token"], undefined);
     }
     const llm = JSON.parse(preparations[1].body.input_json).raw;
@@ -208,7 +208,7 @@ test("run output survives a missing model step and failed interrupted-step expor
     await recorder.close();
     assert.equal(recorder.takeExportErrors().length, 1);
     const output = server.calls.find(
-      (call) => call.path === "/runner/run-io" && call.body.kind === "output",
+      (call) => call.path === "/runner/trace-io" && call.body.kind === "output",
     );
     assert.equal(JSON.parse(output!.body.value)[0].text, "successful answer");
     assert.equal(server.calls.at(-1)!.path, "/runner/deregister");

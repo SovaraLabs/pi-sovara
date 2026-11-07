@@ -17,7 +17,7 @@ export function explainError(error: unknown, config?: Config): string {
     if (error.code === "exec_server_start_failed")
       return "The local Sovara server could not start. Run `sovara exec-server start` for details, then /reload.";
     if (error.code === "incompatible_runner_api")
-      return "This Sovara server does not support runner-api 4. Install compatible Sovara/Pi extension versions, then /reload.";
+      return "This Sovara server does not support runner-api 5. Install compatible Sovara/Pi extension versions, then /reload.";
     return `${error.message}. Check the selected Sovara server, then /reload.`;
   }
   if (error instanceof Error && error.name === "AbortError")
