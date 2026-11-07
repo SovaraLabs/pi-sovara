@@ -198,7 +198,7 @@ export class SovaraClient {
       headers: {
         "content-type": "application/json",
         "x-sovara-component": "pi-extension",
-        "x-sovara-version": "0.1.0",
+        "x-sovara-version": "0.1.3",
         "x-sovara-contract": "runner-api",
         "x-sovara-contract-version": "5",
         ...(recording
