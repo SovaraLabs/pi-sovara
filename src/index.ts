@@ -22,7 +22,7 @@ function inheritedParent(): Parent | undefined {
   if (
     !value.url ||
     !value.projectName ||
-    !value.scope?.recording?.run_write_token ||
+    !value.scope?.recording?.trace_write_token ||
     !value.scope.turnId
   ) {
     throw new Error("Invalid Sovara parent context");
@@ -134,7 +134,7 @@ export default function sovara(pi: ExtensionAPI): void {
         config.projectName = parent.projectName;
       }
       const client = new SovaraClient(config);
-      if (parent) client.protect(parent.scope.recording.run_write_token);
+      if (parent) client.protect(parent.scope.recording.trace_write_token);
       await client.connect();
       const header = ctx.sessionManager.getHeader();
       recorder = new Recorder(

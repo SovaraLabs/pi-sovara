@@ -31,8 +31,8 @@ from sovara_server_common.database import DB
 from sovara_server_common.stream_reconstruction import effective_output_to_show
 
 from sovara_server_common.lessons_backend.storage import LessonStore
-from sovara_app_server.routes.ui_runs import (
-    _get_lesson_retrieval_rows_for_run,
+from sovara_app_server.routes.ui_traces import (
+    _get_lesson_retrieval_rows_for_trace,
     _lesson_retrieval_list_row,
     _lesson_retrieval_list_payload,
     _lesson_retrieval_detail_payload,
@@ -55,16 +55,16 @@ def seed_lessons(project_id: str):
     ]
 
 
-@app.get("/health/test-run/{run_id}")
-def inspect(run_id: str):
-    tree = DB.get_run_tree(run_id, with_turns=True).model_dump(mode="json")
+@app.get("/health/test-run/{trace_id}")
+def inspect(trace_id: str):
+    tree = DB.get_trace_tree(trace_id, with_turns=True).model_dump(mode="json")
     for step in tree["steps"]:
         if step.get("output_json"):
             step["display_output"] = effective_output_to_show(
                 json.loads(step["output_json"]), step["api_type"], rebuild_from_raw=True
             )
-    records = _get_lesson_retrieval_rows_for_run(run_id)
-    project_id = DB.get_run_scope(run_id)["project_id"]
+    records = _get_lesson_retrieval_rows_for_trace(trace_id)
+    project_id = DB.get_trace_scope(trace_id)["project_id"]
     rows = [_lesson_retrieval_list_row(record) for record in records]
     resolved = resolve_lesson_records(
         (entry for row in rows for entry in row["applied_lessons"]), project_id

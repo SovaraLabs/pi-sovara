@@ -2,6 +2,8 @@
 
 Give Pi your team’s knowledge. Sovara automatically retrieves relevant lessons and records your sessions for review.
 
+Requires a Sovara exec-server supporting runner-api 5 (CLI 0.11 or newer). Older servers are rejected before recording starts.
+
 ## Getting started
 
 1. [Install Sovara Desktop and the CLI](https://docs.sovara-labs.com/get-started/installation). Open Desktop and complete setup.

@@ -139,7 +139,7 @@ test("retrieval rejects malformed responses at the boundary", async () => {
         ? {
             compatibility: {
               component: "exec-server",
-              contracts: { "runner-api": [4] },
+              contracts: { "runner-api": [5] },
             },
           }
         : payload,
@@ -158,9 +158,9 @@ test("retrieval rejects malformed responses at the boundary", async () => {
   await client.connect();
   const scope = {
     recording: {
-      run_id: "r",
+      trace_id: "r",
       recording_id: "rec",
-      run_write_token: "token",
+      trace_write_token: "token",
       project_id: "p",
     },
     turnId: "turn",

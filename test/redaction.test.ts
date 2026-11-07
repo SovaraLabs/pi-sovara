@@ -42,7 +42,7 @@ test("captured bodies redact inherited and recording credentials; auth remains u
         JSON.stringify(call.body),
         /parent-secret|recording-secret|agent-secret|provider-secret/,
       );
-      assert.equal(call.headers["x-sovara-run-token"], "recording-secret");
+      assert.equal(call.headers["x-sovara-trace-token"], "recording-secret");
     }
   } finally {
     await backend.close();
@@ -70,7 +70,7 @@ test("structured run I/O and step payloads redact before JSON encoding", async (
     const step = await client.prepare(scope, "sovara.trace", "tool", content);
     await client.finish(step, content);
     for (const call of backend.calls.filter((call) =>
-      /turns|run-io|prepare|finalize/.test(call.path),
+      /turns|trace-io|prepare|finalize/.test(call.path),
     )) {
       for (const key of ["turn_input", "value", "input_json", "output_json"]) {
         if (!(key in call.body)) continue;
